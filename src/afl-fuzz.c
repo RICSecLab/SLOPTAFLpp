@@ -2053,12 +2053,16 @@ int main(int argc, char **argv_orig, char **envp) {
               break;
             case 2:
               // increase havoc mutations per fuzz attempt
+#ifndef BATCHSIZE_BANDIT
               afl->havoc_stack_pow2++;
+#endif
               afl->expand_havoc = 3;
               break;
             case 3:
               // further increase havoc mutations per fuzz attempt
+#ifndef BATCHSIZE_BANDIT
               afl->havoc_stack_pow2++;
+#endif
               afl->expand_havoc = 4;
               break;
             case 4:

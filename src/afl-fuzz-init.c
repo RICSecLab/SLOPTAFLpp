@@ -2041,7 +2041,38 @@ void setup_dirs_fds(afl_state_t *afl) {
         afl->fsrv.plot_file,
         "# relative_time, cycles_done, cur_path, paths_total, "
         "pending_total, pending_favs, map_size, unique_crashes, "
-        "unique_hangs, max_depth, execs_per_sec, total_execs, edges_found\n");
+        "unique_hangs, max_depth, execs_per_sec, total_execs, edges_found, total_havocs");
+
+    int i;
+#if defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+    for (i=0; i<NUM_MUT_BUCKET; i++) {
+
+      #ifdef MOPTWISE_BANDIT
+      const int jlim = NUM_CASE_ENUM;
+      #else
+      const int jlim = 2;
+      #endif
+
+      int j;
+      for (j=0; j<jlim; j++) {
+        fprintf(afl->fsrv.plot_file, ", total_reward_mut_%d_%d, num_selected_mut_%d_%d", i, j, i, j);
+      }
+    }
+#endif
+
+#ifdef BATCHSIZE_BANDIT
+    for (i=0; i<NUM_BATCH_BUCKET; i++) {
+      int j;
+      for (j=0; j<NUM_CASE; j++) {
+        int k;
+        for (k=0; k<=afl->havoc_stack_pow2; k++) {
+          fprintf(afl->fsrv.plot_file, ", total_reward_%d_%d_%d, num_selected_%d_%d_%d", i, j, k, i, j, k);
+        }
+      }
+    }
+#endif
+
+    fprintf(afl->fsrv.plot_file, "\n");
 
   } else {
 

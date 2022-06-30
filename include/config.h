@@ -292,7 +292,11 @@
 /* Fuzzer stats file and plot update intervals (sec): */
 
 #define STATS_UPDATE_SEC 60
+#if BATCH_NUM_ARM == 7
 #define PLOT_UPDATE_SEC 5
+#else
+#define PLOT_UPDATE_SEC 900
+#endif
 
 /* Smoothing divisor for CPU load and exec speed stats (1 - no smoothing). */
 

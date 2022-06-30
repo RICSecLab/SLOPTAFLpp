@@ -28,6 +28,725 @@
 #include <limits.h>
 #include "cmplog.h"
 
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+
+static double kl(double p, double q) {
+  return p*log(p/q) + (1-p)*log((1-p)/(1-q));
+}
+
+static double dkl(double p, double q) {
+  return (q-p) / (q*(1-q));
+}
+
+static double klucb_klucb(klucb_t* inst, normal_bandit_arm* arm) {
+  const double logndn = log(inst->time_step) / arm->num_selected;
+  const double p = MAX(arm->sample_mean, KLUCB_DELTA);
+  if (p >= 1) return 1;
+
+  double q = p + KLUCB_DELTA;
+  for (int t=0; t < 25; ++t) {
+      const double f = logndn - kl(p, q);
+      const double df = -dkl(p, q);
+      if (f*f < KLUCB_EPS) break;
+
+      q -= f/df;
+      if (q < p + KLUCB_DELTA) q = p + KLUCB_DELTA;
+      if (q > 1 - KLUCB_DELTA) q = 1 - KLUCB_DELTA;
+  }
+
+  return q;
+}
+
+double div_inf(double x, double y) {
+    if (y == 0.0 || y == -0.0)
+        return INFINITY;
+    return x / y;
+}
+
+void exppp_gap_estimate(exppp_t *self, double *Delta) {
+    double average_losses[EXP_MAX_N_ARMS];
+    double exploration_term[EXP_MAX_N_ARMS];
+    double UCB[EXP_MAX_N_ARMS];
+    double LCB[EXP_MAX_N_ARMS];
+
+    double min_UCB = INFINITY;
+    for (u64 i = 0; i < self->n_arms; i++) {
+        average_losses[i] = div_inf((double)self->unweighted_losses[i],
+                (double)self->pulls[i]);
+        exploration_term[i] = sqrt(div_inf(EXP_ALPHA * log(self->t) +
+                    log(self->n_arms),  2 * self->pulls[i]));
+        UCB[i] = MIN(1.0, average_losses[i] + exploration_term[i]);
+        LCB[i] = MAX(0.0, average_losses[i] - exploration_term[i]);
+        min_UCB = MIN(UCB[i], min_UCB);
+    }
+    for (u64 i = 0; i < self->n_arms; i++) {
+        Delta[i] = MAX(0.0, LCB[i] - min_UCB);
+        // if (self->t >= self->n_arms) {
+        // //printf("D[%d]: %lf\n", i, Delta[i]);
+        // //printf("LCB[%d]: %lf\n", i, LCB[i]);
+        // //printf("average_losses[%d]: %lf\n", i, average_losses[i]);
+        // //printf("exploration_term[%d]: %lf\n", i, exploration_term[i]);
+        //     assert(Delta[i] >= 0.0);
+        //     assert(Delta[i] <= 1.0);
+        // }
+    }
+}
+
+double exppp_xi(exppp_t *self, u64 arm, double *gap_estimated) {
+    return div_inf(EXP_BETA * log(self->t), (self->t * (pow(gap_estimated[arm],
+                        2))));
+}
+
+void exppp_epsilon(exppp_t *self, double epsilons[EXP_MAX_N_ARMS]) {
+    double gap_estimated[EXP_MAX_N_ARMS];
+    exppp_gap_estimate(self, gap_estimated);
+    for (u64 arm = 0; arm < self->n_arms; arm++) {
+        //printf("gap_estimated[%d]=%lf\n", arm, gap_estimated[arm]);
+        //printf("%d %lf %lf\n", self->t, pow(gap_estimated[arm], 2), exppp_xi(self, arm, gap_estimated));
+
+        epsilons[arm] = MIN(MIN(0.5 / self->n_arms, 0.5 * sqrt(log(self->n_arms) /
+                        self->t/ self->n_arms)), exppp_xi(self, arm, gap_estimated));
+    }
+}
+
+double exppp_eta(exppp_t *self) {
+  return 0.5 * sqrt(log(self->n_arms) / (double)self->n_arms/ (double)(self->t+1));
+}
+
+void exppp_update_trusts(exppp_t *self) {
+  // double eta = exppp_eta(self);
+  // assert(0.0 <= eta && eta <= 1.0);
+  double sum_of_trusts = 0.0;
+
+  double epsilons[EXP_MAX_N_ARMS] = {};
+  exppp_epsilon(self, epsilons);
+  double sum_of_epsilons = 0.0;
+  for (u64 i = 0; i < self->n_arms; i++) {
+      sum_of_epsilons += epsilons[i];
+  }
+
+  for (u64 i = 0; i < self->n_arms; i++) {
+    self->trusts[i] = ((1.0 - sum_of_epsilons) * self->weights[i]) +
+        epsilons[i];
+
+    sum_of_trusts += self->trusts[i];
+  }
+  // numpy's default tolerance
+  if (sum_of_trusts < 1e-08) {
+    for (u64 i = 0; i < self->n_arms; i++) {
+      self->trusts[i] = 1.0 / self->n_arms;
+    }
+    sum_of_trusts = 1.0;
+  }
+  for (u64 i = 0; i < self->n_arms; i++){
+    self->trusts[i] /= sum_of_trusts;
+  }
+}
+
+void exppp_add_reward(exppp_t* self, int arm, double reward) {
+  // assert(0.0 <= reward && reward <= 1.0);
+  self->total_rewards[arm] += (int)reward;
+  reward = (reward - EXP_LOWER) / EXP_AMPLITUDE;
+  double loss = 1.0 - reward;
+  self->unweighted_losses[arm] += loss;
+
+  loss = loss / self->trusts[arm];
+  self->losses[arm] += loss;
+
+  double sum_of_weights = 0.0;
+  double eta = exppp_eta(self);
+  double min_loss_eta = INFINITY;
+  for (u64 i = 0; i < self->n_arms; i++) {
+      min_loss_eta = MIN(min_loss_eta, -eta * self->losses[i]);
+  }
+  for (u64 i=0; i < self->n_arms; i++) {
+    self->weights[i] = exp(- eta * self->losses[i] -min_loss_eta);
+    sum_of_weights += self->weights[i];
+  }
+  for (u64 i=0; i < self->n_arms; i++) {
+    self->weights[i] /= sum_of_weights;
+  }
+}
+
+u64 choice_from_distribution(afl_state_t *afl, exppp_t *self) {
+  double sum_of_possibility = 0.0;
+  double target = gsl_rng_uniform(afl->gsl_rng_state);
+
+  exppp_update_trusts(self);
+
+  for (u64 i = 0; i < self->n_arms; i++) {
+    sum_of_possibility += self->trusts[i];
+    if (target < sum_of_possibility) {
+      return i;
+    }
+  }
+  return self->n_arms - 1;
+}
+
+u64 exppp_select_arm(afl_state_t *afl, exppp_t* self, u8* mask) {
+  u64 choice;
+  self->t++;
+  if (self->t <= self->n_arms) {
+    choice = self->t - 1;
+  } else {
+    choice = choice_from_distribution(afl, self);
+  }
+  self->pulls[choice] += 1;
+  return choice;
+}
+
+#include <math.h>
+
+u64 expix_select_arm(afl_state_t *afl, expix_t* self, u8* mask) {
+  self->t++;
+
+  double sum_of_possibility = 0.0;
+  double target = gsl_rng_uniform(afl->gsl_rng_state);
+
+  for (u64 i = 0; i < self->n_arms; i++) {
+    sum_of_possibility += self->weights[i];
+    if (target < sum_of_possibility) {
+      self->pulls[i]++;
+      return i;
+    }
+  }
+  self->pulls[self->n_arms - 1]++;
+  return self->n_arms - 1;
+}
+
+void expix_add_reward(expix_t* self, int arm, double reward) {
+  self->total_rewards[arm] += (int)reward;
+
+  double eta = sqrt(2 * log(self->n_arms) / self->n_arms / self->t);
+  double gamma = eta/2;
+
+  double loss = 1.0 - reward;
+  loss = loss / (self->weights[arm] + gamma);
+  self->losses[arm] += loss;
+
+  double min_loss = INFINITY;
+  for (u64 i = 0; i < self->n_arms; i++) {
+      min_loss = MIN(min_loss, self->losses[i]);
+  }
+
+  double denom = 0;
+  for (u64 i = 0; i < self->n_arms; i++) {
+      self->weights[i] = exp(-eta * (self->losses[i] - min_loss));
+      denom += self->weights[i];
+  }
+
+  for (u64 i=0; i < self->n_arms; i++) {
+    self->weights[i] /= denom;
+  }
+}
+
+/* Adwin */
+
+void init_adwin(adwin_t *ret) {
+  ret->head = calloc(1, sizeof(adwin_node_t));
+  ret->tail = ret->head;
+}
+
+void dest_adwin(adwin_t* adwin) {
+  adwin_node_t* node;
+  for (node=adwin->head; node; ) {
+    adwin_node_t* nxt = node->next;
+    free(node);
+    node = nxt;
+  }
+}
+
+void adwin_remove_front_windows(adwin_node_t* node, int num) {
+  int i;
+  int lim = node->size - num;
+  for (i=0; i<lim; i++) {
+    node->sum[i] = node->sum[i+num];
+  }
+  node->size -= num;
+}
+
+void adwin_add_tail_window(adwin_node_t* node, u64 s) {
+  node->sum[node->size++] = s;
+}
+
+adwin_node_t* adwin_add_tail_node(adwin_t* adwin) {
+  adwin->last_node_idx++;
+
+  adwin_node_t* new_tail = calloc(1, sizeof(adwin_node_t));
+  
+  adwin->tail->next = new_tail;
+  new_tail->prev = adwin->tail;
+  
+  adwin->tail = new_tail;
+
+  return adwin->tail;
+}
+
+void adwin_expire_last_window(adwin_t* adwin) {
+  adwin->W -= 1ull << adwin->last_node_idx;
+  adwin->sum -= adwin->tail->sum[0];
+
+  adwin_remove_front_windows(adwin->tail, 1);
+
+  if (adwin->tail->size == 0 && adwin->tail != adwin->head) {
+    adwin_node_t* new_tail = adwin->tail->prev;
+    free(adwin->tail);
+
+    new_tail->next = NULL;
+    adwin->tail = new_tail;
+
+    adwin->last_node_idx--;
+  }
+}
+
+void adwin_normlize_buckets(adwin_t* adwin) {
+  int exp;
+  adwin_node_t* node;
+
+  for (exp=0, node=adwin->head; node; exp++, node=node->next) {
+    if (node->size <= ADWIN_M) break;
+
+    adwin_node_t* next = node->next;
+    if (!next) {
+      next = adwin_add_tail_node(adwin);
+    }
+    
+    // The calculation of variation in the original adwin implementation seems wrong 
+    u64 s = node->sum[0] + node->sum[1];
+    adwin_add_tail_window(node->next, s);
+
+    adwin_remove_front_windows(node, 2);
+  }
+}
+
+inline u8 adwin_should_drop(u64 s0, u64 n0, u64 s1, u64 n1, double ddv2, double dd2_3) {
+  double u0 = s0 / (double)n0;
+  double u1 = s1 / (double)n1;
+  double du = u0 - u1;
+
+  double inv_m = 1.0 / (1 + n0 - ADWIN_MIN_ELEM_TO_CHECK) + 1.0 / (1 + n1 - ADWIN_MIN_ELEM_TO_CHECK);
+  double eps = sqrt(ddv2*inv_m) + dd2_3 * inv_m;
+  
+  if (fabs(du) > eps) return 1;
+  
+  return 0;
+}
+
+void adwin_drop_last_till_identical(adwin_t* adwin) {
+  if (adwin->W < ADWIN_MIN_ELEM_TO_START_DROP) return;
+
+  while (1) {
+    bool dropped = false;
+
+    u64 n0 = 0;
+    u64 s0 = 0;
+    u64 n1 = adwin->W;
+    u64 s1 = adwin->sum;
+    int exp = adwin->last_node_idx;
+
+    double n = adwin->W;
+    double dd2 = log(2.0 * log(n) / ADWIN_DELTA) * 2;
+    double u = adwin->sum / n;
+    double ddv2 = u * (1-u) * dd2;
+    double dd2_3 = dd2 / 3.0;
+
+    adwin_node_t* node;
+    for (node=adwin->tail; node; node=node->prev) {
+      int k;
+      for (k=0; k < node->size; k++) {
+        n0 += 1ull << exp;
+        n1 -= 1ull << exp;
+        s0 += node->sum[k];
+        s1 -= node->sum[k];
+
+        if (n1 < ADWIN_MIN_ELEM_TO_CHECK) goto L_CHECK_END;
+        if (n0 < ADWIN_MIN_ELEM_TO_CHECK) continue;
+
+        if (adwin_should_drop(s0, n0, s1, n1, ddv2, dd2_3)) {
+
+#ifdef ADWIN_ADAPTIVE_RESETTING
+          dest_adwin(adwin);
+          memset(adwin, 0, sizeof(adwin_t));
+          init_adwin(adwin);
+#else
+          dropped = true;
+          adwin_expire_last_window(adwin);
+#endif
+          goto L_CHECK_END;
+        }
+      }
+      --exp;
+    }
+
+L_CHECK_END:
+
+    if (!dropped) break;
+  }
+}
+
+void adwin_add_elem(adwin_t* adwin, u8 reward) {
+  adwin->W++;
+  adwin->sum += reward;
+  adwin_add_tail_window(adwin->head, reward);
+
+  adwin_normlize_buckets(adwin);
+
+#if ADWIN_DROP_INTERVAL != 1
+  adwin->num_add++;
+  if (adwin->num_add != ADWIN_DROP_INTERVAL) return;
+  adwin->num_add = 0;
+#endif
+
+  adwin_drop_last_till_identical(adwin);
+}
+
+double adwin_get_estimation(adwin_t* adwin) {
+  if (adwin->W > 0) return adwin->sum / (double)adwin->W;
+  return 0;
+}
+
+inline void uniform_add_reward(uniform_t* inst, int idx, u8 r) {
+  uniform_bandit_arm *arm = &inst->arms[idx];
+  arm->num_selected++;
+  arm->total_rewards += r;
+}
+
+inline void ucb_add_reward(ucb_t* inst, int idx, u8 r) {
+  inst->time_step++;
+
+  normal_bandit_arm *arm = &inst->arms[idx];
+
+  arm->num_selected++;
+  arm->total_rewards += r;
+  arm->sample_mean = ((double)(arm->total_rewards))/(arm->num_selected);
+}
+
+inline void klucb_add_reward(klucb_t* inst, int idx, u8 r) {
+  inst->time_step++;
+
+  normal_bandit_arm *arm = &inst->arms[idx];
+
+  arm->num_selected++;
+  arm->total_rewards += r;
+  arm->sample_mean = ((double)(arm->total_rewards))/(arm->num_selected);
+}
+
+inline void ts_add_reward(ts_t* inst, int idx, u8 r) {
+  normal_bandit_arm *arm = &inst->arms[idx];
+
+  arm->num_selected++;
+  arm->total_rewards += r;
+  arm->sample_mean = ((double)(arm->total_rewards))/(arm->num_selected);
+}
+
+inline void adsts_add_reward(adsts_t* inst, int idx, u8 r) {
+  adwin_bandit_arm *arm = &inst->arms[idx];
+
+  arm->num_selected++;
+  arm->total_rewards += r;
+  adwin_add_elem(&arm->adwin, r);
+}
+
+inline void dts_add_reward(dts_t* inst, int idx, u8 r) {
+  dts_bandit_arm *arm = &inst->arms[idx];
+
+  arm->num_selected++;
+  arm->num_rewarded += r;
+
+  // already discounted in dts_select_arm
+  arm->total_rewards += r;
+  arm->total_losses  += 1 - r;
+}
+
+inline void dbe_add_reward(dbe_t* inst, int idx, u8 r) {
+  dbe_bandit_arm *arm = &inst->arms[idx];
+
+  arm->num_selected++;
+  arm->num_rewarded += r;
+
+  // already discounted in dbe_select_arm
+  arm->total_rewards += r;
+  arm->dis_num_selected += 1;
+  // Note that, sample_mean of the other arms that are not selected, will remain the same
+  // since total_rewards' = total_rewards * gamma and dis_num_selected' = dis_num_selected * gamma,
+  // so total_rewards' / dis_num_selected' = total_rewards / dis_num_selected
+  arm->sample_mean = arm->total_rewards / arm->dis_num_selected;
+}
+
+inline u64 normal_num_selected(normal_bandit_arm* arm) {
+  return arm->num_selected;
+}
+
+inline u64 normal_total_rewards(normal_bandit_arm* arm) {
+  return arm->total_rewards;
+}
+
+inline double normal_sample_mean(normal_bandit_arm* arm) {
+  return arm->sample_mean;
+}
+
+inline u64 adwin_num_selected(adwin_bandit_arm* arm) {
+  return arm->adwin.W;
+}
+
+inline u64 adwin_total_rewards(adwin_bandit_arm* arm) {
+  return arm->adwin.sum;
+}
+
+inline double adwin_sample_mean(adwin_bandit_arm* arm) {
+  return adwin_get_estimation(&arm->adwin);
+}
+
+/* Bandit */
+
+int dts_select_arm(afl_state_t *afl, dts_t* inst, u8* mask) {
+  int i;
+  double max_sampled = -1;
+  int selected_idx = 0;
+  int n = inst->n_arms;
+  dts_bandit_arm *slots = inst->arms;
+
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+
+    double a = slots[i].total_rewards + 1;
+    double b = slots[i].total_losses  + 1;
+    double sampled = gsl_ran_beta(afl->gsl_rng_state, a, b);
+
+#ifdef OPTIMISTIC_DTS
+    // dOTS
+    double beta_mean = a/(a+b); 
+    if (sampled < beta_mean) sampled = beta_mean;
+#endif
+
+    if (sampled > max_sampled) {
+      max_sampled = sampled;
+      selected_idx = i;
+    }
+  }
+
+  for (i = 0; i < n; i++) {
+    // We need to discount rewards even if skipping the arm.
+    slots[i].total_rewards *= DTS_GAMMA;
+    slots[i].total_losses  *= DTS_GAMMA;
+  }
+
+  return selected_idx;
+}
+
+int dbe_select_arm(afl_state_t *afl, dbe_t *inst, u8* mask) {
+  // We don't prepare SIVO's constants such as
+  // SAMPLE_RANDOMLY_UNTIL_ROUND, SAMPLE_RANDOMLY_THIS_ROUND, 
+  // SAMPLE_NOT_RANDOMLY, SAMPLE_RANDOMLY_THIS_ROUND_NO_UPDATE.
+  // the last 3 constants don't make sense because 
+  // bandit algorithms are designed to minimize regret from the beggining, 
+  // and ignoring it and using uniform distribution sometimes destroys
+  // its performance and theoretical guarantees.
+  // On the other hand, SAMPLE_RANDOMLY_UNTIL_ROUND may be legitimate, 
+  // since it can be considered as preparing more accurate prior distributions 
+  // than uniform distributions, and since that preprocess is commonly used 
+  // also in other algorithms like eps-greedy.
+  // However, recalling that this is a non-stationary setting, 
+  // and that initial samples will be forgot at some time, 
+  // the preprocess of drawing values from uniform distributions to obtain initial estimates 
+  // of expected rewards is not so meaningful.
+
+  int index = 0;
+  int n = inst->n_arms;
+  dbe_bandit_arm *slots = inst->arms;
+
+  double max_avg = 0;
+  double redcoef = 1.0;
+  int ACTIVE = 0;
+
+  for (int i=0; i<n; i++) {
+    if (mask && mask[i]) continue;
+
+    ACTIVE++;
+    // Lazily update sample_mean
+    if (slots[i].dis_num_selected > 0) {
+      if (max_avg < slots[i].sample_mean) max_avg = slots[i].sample_mean;
+    }
+  }
+
+  // i'm not sure what this heuristics means :(
+  if (max_avg > 0) redcoef = 1.0 / (2.0 * max_avg);
+
+  // maybe this is working as a kind of adaptive resetting bandit(?)
+  // if so, this is not a pure discounting algorithm...
+  if (redcoef > 1 << 30) {
+    for (int i=0; i<n; i++) {
+      slots[i].total_rewards = 1.0;
+      slots[i].dis_num_selected = 1.0;
+      slots[i].sample_mean = 1.0;
+    }
+  }
+
+  int *indices = malloc(n * sizeof(int));
+  int num_indices = 0;
+  // pick index if not sampled 
+  for (int i=0; i<n; i++) {
+    if (mask && mask[i]) continue;
+    if (slots[i].dis_num_selected <= 0) {
+      indices[num_indices++] = i;
+    }
+  }
+  if (num_indices > 0) {
+    // probably just returning 0 is the same...(it's a negligible difference)
+    return indices[rand_below(afl, num_indices)];
+  }
+
+  double *w = calloc(n, sizeof(double));
+  double cur, beta;
+  for (int i=0; i<n; i++) {
+    if (mask && mask[i]) continue; // due to calloc, w[i] = 0, so no problem
+
+    beta = 4 + 2 * ACTIVE;
+
+    // Our bandit problems are not small bandit problem like 2 arms
+    /*if( x[i].allow_small > 0 )
+      beta = x[i].allow_small;*/
+ 
+    cur = beta * (redcoef * slots[i].sample_mean);
+    // Follow SIVO. Though I'm not sure about other heuristics,
+    // this is valid since 2^x = e^(x*log_e(2))
+    w[i] = pow(2, cur);
+  }
+
+  gsl_ran_discrete_t *lookup = gsl_ran_discrete_preproc(n, w);
+  index = gsl_ran_discrete(afl->gsl_rng_state, lookup);
+  gsl_ran_discrete_free(lookup);
+
+  for (int i = 0; i < n; i++) {
+    // We need to discount rewards even if skipping the arm.
+    slots[i].total_rewards *= DBE_GAMMA;
+    slots[i].dis_num_selected  *= DBE_GAMMA;
+  }
+
+  return index;
+}
+
+int uniform_select_arm(afl_state_t *afl, ucb_t *inst, u8* mask) {
+  int i;
+  int n = inst->n_arms;
+
+  int cnt = 0;
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+    cnt++;
+  }
+
+  int k = rand_below(afl, cnt);
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+    if (!k) return i;
+    --k;
+  }
+
+  assert(0);
+}
+
+int ucb_select_arm(afl_state_t *afl, ucb_t *inst, u8* mask) {
+  int i;
+  double max_ucb = -1;
+  int selected_idx;
+  int n = inst->n_arms;
+  normal_bandit_arm *slots = inst->arms;
+
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+
+    if (normal_num_selected(&slots[i]) == 0) {
+      selected_idx = i;
+      break;
+    }
+
+    double ucb = normal_sample_mean(&slots[i])
+              + sqrt(2 * log(inst->time_step) / normal_num_selected(&slots[i]));
+    if (ucb > max_ucb) {
+      max_ucb = ucb;
+      selected_idx = i;
+    }
+  }
+
+  return selected_idx;
+}
+
+int klucb_select_arm(afl_state_t *afl, klucb_t *inst, u8* mask) {
+  int i;
+  double max_ucb = -1;
+  int selected_idx;
+  int n = inst->n_arms;
+  normal_bandit_arm *slots = inst->arms;
+
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+
+    if (normal_num_selected(&slots[i]) == 0) {
+      selected_idx = i;
+      break;
+    }
+
+
+    double ucb = klucb_klucb(inst, &slots[i]);
+    if (ucb > max_ucb) {
+      max_ucb = ucb;
+      selected_idx = i;
+    }
+  }
+
+  return selected_idx;
+}
+
+int ts_select_arm(afl_state_t *afl, ts_t* inst, u8* mask) {
+  int i;
+  int n = inst->n_arms;
+  normal_bandit_arm *slots = inst->arms;
+
+  double max_sampled = -1;
+  int selected_idx = 0;
+
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+
+    u64 total_rewards = normal_total_rewards(&slots[i]);
+    u64 a = total_rewards + 1;
+    u64 b = normal_num_selected(&slots[i]) - total_rewards + 1;
+    double sampled = gsl_ran_beta(afl->gsl_rng_state, (double)a, (double)b);
+    if (sampled > max_sampled) {
+      max_sampled = sampled;
+      selected_idx = i;
+    }
+  }
+
+  return selected_idx;
+}
+
+int adsts_select_arm(afl_state_t *afl, adsts_t* inst, u8* mask) {
+  int i;
+  int n = inst->n_arms;
+  adwin_bandit_arm *slots = inst->arms;
+
+  double max_sampled = -1;
+  int selected_idx = 0;
+
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+
+    u64 total_rewards = adwin_total_rewards(&slots[i]);
+    u64 a = total_rewards + 1;
+    u64 b = adwin_num_selected(&slots[i]) - total_rewards + 1;
+    double sampled = gsl_ran_beta(afl->gsl_rng_state, (double)a, (double)b);
+    if (sampled > max_sampled) {
+      max_sampled = sampled;
+      selected_idx = i;
+    }
+  }
+
+  return selected_idx;
+}
+
 /* MOpt */
 
 static int select_algorithm(afl_state_t *afl, u32 max_algorithm) {
@@ -2023,9 +2742,284 @@ havoc_stage:
 
   }
 
+  int batch_bucket = NUM_BATCH_BUCKET-1;
+#if NUM_BATCH_BUCKET == 5
+  if (len <= 100) {
+    batch_bucket = 0;
+  } else if (len <= 1000) {
+    batch_bucket = 1;
+  } else if (len <= 10000) {
+    batch_bucket = 2;
+  } else if (len <= 100000) {
+    batch_bucket = 3;
+  }
+#endif
+
+  int mut_bucket;
+#ifdef USE_LEN_BUCKET_FOR_MOPTWISE
+  mut_bucket = batch_bucket;
+#else
+  mut_bucket = 0;
+#endif
+
+  BANDIT_T(MUT_ALG)*    mut_bandit  = &afl->mut_bandit[mut_bucket];
+  BANDIT_T(BATCH_ALG)* used_bucket = afl->batch_bandit[batch_bucket];
+
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
-    u32 use_stacking = 1 << (1 + rand_below(afl, afl->havoc_stack_pow2));
+#ifdef MOPTWISE_BANDIT
+
+    int selected_case;
+    u8 mask[NUM_CASE_ENUM] = { 0 };
+
+    if (!afl->extras_cnt) {
+      mask[OVERWRITE_WITH_EXTRA] = 1;
+      mask[INSERT_EXTRA] = 1;
+    }
+
+    if (!afl->a_extras_cnt) {
+      mask[OVERWRITE_WITH_AEXTRA] = 1;
+      mask[INSERT_AEXTRA] = 1;
+    }
+
+    if (afl->ready_for_splicing_count <= 1) {
+      mask[SPLICE_INSERT] = 1;
+      mask[SPLICE_OVERWRITE] = 1;
+    }
+
+    if (len + HAVOC_BLK_XL >= MAX_FILE) {
+      mask[SPLICE_INSERT] = 1;
+    }
+
+    if (len < 2) {
+      mask[SPLICE_OVERWRITE] = 1;
+    }
+    
+    selected_case = SELECT_ARM(MUT_ALG)(afl, mut_bandit, mask);
+
+#if MUT_ALG == exppp || MUT_ALG == expix
+    u8 exp_invalid = mask[selected_case];
+    if (exp_invalid) goto L_EXP_INVALID;
+#endif
+
+    static const int case2r[] = {
+      0, 4, 8, 10, 12, 14, 16, 20, 24, 26, 28, 30, 32, 34, 36, 38, 40, 44, 47, 48, 51, 52, MAX_HAVOC_ENTRY+1,
+      MAX_HAVOC_ENTRY+3, MAX_HAVOC_ENTRY+5, MAX_HAVOC_ENTRY+7, MAX_HAVOC_ENTRY+10, MAX_HAVOC_ENTRY+9
+    };
+
+    r = case2r[selected_case];
+    if (selected_case >= OVERWRITE_WITH_AEXTRA) {
+      if (!afl->extras_cnt) r -= 4;
+    }
+
+    if (selected_case >= SPLICE_OVERWRITE) {
+      if (!afl->a_extras_cnt) r -= 4;
+    }
+
+#elif defined(MOPTWISE_BANDIT_FINECOARSE) /* MOPTWISE_BANDIT */
+ 
+    int selected_case;
+    selected_case = SELECT_ARM(MUT_ALG) (afl, mut_bandit, NULL);
+
+    if (selected_case == 0) r = rand_below(afl, 44);
+    else r = 44 + rand_below(afl, r_max-44);
+
+#else /* MOPTWISE_BANDIT */ 
+    /* otherwise draw r uniformly randomly */ 
+    r = rand_below(afl, r_max);
+#endif
+
+    int case_idx = 0;
+
+#ifdef ATOMIZE_CASES
+    u32 r_bkup = r;
+    switch (r) {
+      case 0 ... 3: {
+        case_idx = FLIP_BIT1;
+        break;
+      }
+
+      case 4 ... 7: {
+        case_idx = INTERESTING8;
+        break;
+      }
+
+      case 8 ... 9: {
+        case_idx = INTERESTING16;
+        break;    
+      }
+
+      case 10 ... 11: {
+        case_idx = INTERESTING16BE;
+        break;
+      }
+
+      case 12 ... 13: {
+        case_idx = INTERESTING32;
+        break;
+      }
+
+      case 14 ... 15: {
+        case_idx = INTERESTING32BE;
+        break;
+      }
+
+      case 16 ... 19: {
+        case_idx = ARITH8_MINUS;
+        break;
+      }
+
+      case 20 ... 23: {
+        case_idx = ARITH8_PLUS;
+        break;
+      }
+
+      case 24 ... 25: {
+        case_idx = ARITH16_MINUS;
+        break;
+      }
+
+      case 26 ... 27: {
+        case_idx = ARITH16_BE_MINUS;
+        break;
+      }
+
+      case 28 ... 29: {
+        case_idx = ARITH16_PLUS;
+        break;
+      }
+
+      case 30 ... 31: {
+        case_idx = ARITH16_BE_PLUS;
+        break;
+      }
+
+      case 32 ... 33: {
+        case_idx = ARITH32_MINUS;
+        break;
+      }
+
+      case 34 ... 35: {
+        case_idx = ARITH32_BE_MINUS;
+        break;
+      }
+
+      case 36 ... 37: {
+        case_idx = ARITH32_PLUS;
+        break;
+      }
+
+      case 38 ... 39: {
+        case_idx = ARITH32_BE_PLUS;
+        break;
+      }
+
+      case 40 ... 43: {
+        case_idx = RAND8;
+        break;
+      }
+  
+      case 44 ... 46:
+        case_idx = CLONE_BYTES;
+        break;
+
+      case 47:
+        case_idx = INSERT_SAME_BYTE;
+        break;
+
+      case 48 ... 50:
+        case_idx = OVERWRITE_WITH_CHUNK;
+        break;
+
+      case 51:
+        case_idx = OVERWRITE_WITH_SAME_BYTE;
+        break;
+
+      case 52 ... MAX_HAVOC_ENTRY:
+        case_idx = DELETE_BYTES;
+        break;
+
+      default:
+        r -= (MAX_HAVOC_ENTRY + 1);
+        if (afl->extras_cnt) {
+          if (r < 2) {
+            case_idx = OVERWRITE_WITH_EXTRA;
+            break;
+          } else if (r < 4) {
+            case_idx = INSERT_EXTRA;
+            break;
+          } else {
+            r -= 4;
+          }
+        }
+
+        if (afl->a_extras_cnt) {
+          if (r < 2) {
+            case_idx = OVERWRITE_WITH_AEXTRA;
+            break;
+          } else if (r < 4) {
+            case_idx = INSERT_AEXTRA;
+            break;
+          } else {
+            r -= 4;
+          }
+        }
+
+        if ((temp_len >= 2 && r % 2) || temp_len + HAVOC_BLK_XL >= MAX_FILE) {
+            case_idx = SPLICE_OVERWRITE;
+        } else {
+            case_idx = SPLICE_INSERT;
+        }
+
+        break;
+    }
+    r = r_bkup;
+#elif defined(DIVIDE_COARSE_FINE)
+    switch (r) {
+      case 0 ... 43: {
+        case_idx = 0; // fine-grained
+        break;
+      }
+
+      default:
+        case_idx = 1; // coarse-grained
+        break;
+    }
+#else 
+    case_idx = 0;
+#endif
+
+#if defined(MOPTWISE_BANDIT) && defined(ATOMIZE_CASES)
+    if (case_idx != selected_case) {
+      FATAL("case_idx: %d, selected_case: %d, r: %u\n", case_idx, selected_case, r);
+    }
+#endif
+
+    BANDIT_T(BATCH_ALG) *batch_bandit = &used_bucket[case_idx];
+
+    u32 mutation_pos[512];
+    u32 mutation_data32[512];
+
+    enum MutationByteSize { OTHER, BIT1, BYTE1, BYTE2, BYTE4};
+    u8  mutation_size = OTHER;
+
+    u8 *mutation_data8 = (u8*)mutation_data32;
+    u16 *mutation_data16 = (u16*)mutation_data32;
+    //printf("addr~~ %p %p %p\n", mutation_data32, mutation_data8, mutation_data16);
+
+    int selected_t = 0;
+#ifndef BATCHSIZE_BANDIT
+    selected_t = rand_below(afl, afl->havoc_stack_pow2+1);
+#else
+    selected_t = SELECT_ARM(BATCH_ALG) 
+                       (afl, batch_bandit, NULL);
+#endif
+
+#if BATCH_NUM_ARM == 7
+    u32 use_stacking = 1 << selected_t;
+#else
+    u32 use_stacking = 1 + selected_t;
+#endif
 
     afl->stage_cur_val = use_stacking;
 
@@ -2033,8 +3027,6 @@ havoc_stage:
     snprintf(afl->mutation, sizeof(afl->mutation), "%s HAVOC-%u",
              afl->queue_cur->fname, use_stacking);
 #endif
-
-    for (i = 0; i < use_stacking; ++i) {
 
       if (afl->custom_mutators_count) {
 
@@ -2071,7 +3063,7 @@ havoc_stage:
 
       }
 
-      switch ((r = rand_below(afl, r_max))) {
+      switch (r) {
 
         case 0 ... 3: {
 
@@ -2081,7 +3073,17 @@ havoc_stage:
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " FLIP_BIT1");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          FLIP_BIT(out_buf, rand_below(afl, temp_len << 3));
+    
+          mutation_size = BIT1;
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len << 3);
+          mutation_pos[i] = pos; // FLIP_BIT only requires position to revert it
+          FLIP_BIT(out_buf, pos);
+          
+          }
+
           break;
 
         }
@@ -2094,8 +3096,20 @@ havoc_stage:
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " INTERESTING8");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          out_buf[rand_below(afl, temp_len)] =
+
+          mutation_size = BYTE1;
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len);
+          mutation_pos[i] = pos; 
+          mutation_data8[i] = out_buf[pos];
+
+          out_buf[pos] =
               interesting_8[rand_below(afl, sizeof(interesting_8))];
+
+          }
+
           break;
 
         }
@@ -2104,14 +3118,25 @@ havoc_stage:
 
           /* Set word to interesting value, little endian. */
 
+          mutation_size = BYTE2;
+
           if (temp_len < 2) { break; }
 
 #ifdef INTROSPECTION
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " INTERESTING16");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          *(u16 *)(out_buf + rand_below(afl, temp_len - 1)) =
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len - 1);
+          mutation_pos[i] = pos; 
+          mutation_data16[i] = *(u16 *)(out_buf + pos);
+
+          *(u16 *)(out_buf + pos) =
               interesting_16[rand_below(afl, sizeof(interesting_16) >> 1)];
+
+          }
 
           break;
 
@@ -2121,14 +3146,25 @@ havoc_stage:
 
           /* Set word to interesting value, big endian. */
 
+          mutation_size = BYTE2;
+
           if (temp_len < 2) { break; }
 
 #ifdef INTROSPECTION
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " INTERESTING16BE");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          *(u16 *)(out_buf + rand_below(afl, temp_len - 1)) = SWAP16(
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len - 1);
+          mutation_pos[i] = pos; 
+          mutation_data16[i] = *(u16 *)(out_buf + pos);
+
+          *(u16 *)(out_buf + pos) = SWAP16(
               interesting_16[rand_below(afl, sizeof(interesting_16) >> 1)]);
+
+          }
 
           break;
 
@@ -2138,14 +3174,25 @@ havoc_stage:
 
           /* Set dword to interesting value, little endian. */
 
+          mutation_size = BYTE4;
+
           if (temp_len < 4) { break; }
 
 #ifdef INTROSPECTION
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " INTERESTING32");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          *(u32 *)(out_buf + rand_below(afl, temp_len - 3)) =
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len - 3);
+          mutation_pos[i] = pos; 
+          mutation_data32[i] = *(u32 *)(out_buf + pos);
+
+          *(u32 *)(out_buf + pos) =
               interesting_32[rand_below(afl, sizeof(interesting_32) >> 2)];
+          
+          }
 
           break;
 
@@ -2155,14 +3202,25 @@ havoc_stage:
 
           /* Set dword to interesting value, big endian. */
 
+          mutation_size = BYTE4;
+
           if (temp_len < 4) { break; }
 
 #ifdef INTROSPECTION
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " INTERESTING32BE");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          *(u32 *)(out_buf + rand_below(afl, temp_len - 3)) = SWAP32(
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len - 3);
+          mutation_pos[i] = pos; 
+          mutation_data32[i] = *(u32 *)(out_buf + pos);
+
+          *(u32 *)(out_buf + pos) = SWAP32(
               interesting_32[rand_below(afl, sizeof(interesting_32) >> 2)]);
+
+          }
 
           break;
 
@@ -2176,7 +3234,19 @@ havoc_stage:
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " ARITH8_");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          out_buf[rand_below(afl, temp_len)] -= 1 + rand_below(afl, ARITH_MAX);
+
+          mutation_size = BYTE1;
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len);
+          mutation_pos[i] = pos; 
+          mutation_data8[i] = out_buf[pos];
+
+          out_buf[pos] -= 1 + rand_below(afl, ARITH_MAX);
+
+          }
+
           break;
 
         }
@@ -2189,7 +3259,19 @@ havoc_stage:
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " ARITH8+");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          out_buf[rand_below(afl, temp_len)] += 1 + rand_below(afl, ARITH_MAX);
+
+          mutation_size = BYTE1;
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len);
+          mutation_pos[i] = pos; 
+          mutation_data8[i] = out_buf[pos];
+
+          out_buf[pos] += 1 + rand_below(afl, ARITH_MAX);
+
+          }
+
           break;
 
         }
@@ -2198,15 +3280,24 @@ havoc_stage:
 
           /* Randomly subtract from word, little endian. */
 
+          mutation_size = BYTE2;
+
           if (temp_len < 2) { break; }
 
+          for (i = 0; i < use_stacking; ++i) {
+
           u32 pos = rand_below(afl, temp_len - 1);
+          mutation_pos[i] = pos; 
+          mutation_data16[i] = *(u16 *)(out_buf + pos);
+
 
 #ifdef INTROSPECTION
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " ARITH16_-%u", pos);
           strcat(afl->mutation, afl->m_tmp);
 #endif
           *(u16 *)(out_buf + pos) -= 1 + rand_below(afl, ARITH_MAX);
+
+          }
 
           break;
 
@@ -2216,9 +3307,15 @@ havoc_stage:
 
           /* Randomly subtract from word, big endian. */
 
+          mutation_size = BYTE2;
+
           if (temp_len < 2) { break; }
 
+          for (i = 0; i < use_stacking; ++i) {
+
           u32 pos = rand_below(afl, temp_len - 1);
+          mutation_pos[i] = pos; 
+          mutation_data16[i] = *(u16 *)(out_buf + pos);
           u16 num = 1 + rand_below(afl, ARITH_MAX);
 
 #ifdef INTROSPECTION
@@ -2229,6 +3326,8 @@ havoc_stage:
           *(u16 *)(out_buf + pos) =
               SWAP16(SWAP16(*(u16 *)(out_buf + pos)) - num);
 
+          }
+
           break;
 
         }
@@ -2237,15 +3336,23 @@ havoc_stage:
 
           /* Randomly add to word, little endian. */
 
+          mutation_size = BYTE2;
+
           if (temp_len < 2) { break; }
 
+          for (i = 0; i < use_stacking; ++i) {
+
           u32 pos = rand_below(afl, temp_len - 1);
+          mutation_pos[i] = pos; 
+          mutation_data16[i] = *(u16 *)(out_buf + pos);
 
 #ifdef INTROSPECTION
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " ARITH16+-%u", pos);
           strcat(afl->mutation, afl->m_tmp);
 #endif
           *(u16 *)(out_buf + pos) += 1 + rand_below(afl, ARITH_MAX);
+
+          }
 
           break;
 
@@ -2255,9 +3362,15 @@ havoc_stage:
 
           /* Randomly add to word, big endian. */
 
+          mutation_size = BYTE2;
+
           if (temp_len < 2) { break; }
 
+          for (i = 0; i < use_stacking; ++i) {
+
           u32 pos = rand_below(afl, temp_len - 1);
+          mutation_pos[i] = pos; 
+          mutation_data16[i] = *(u16 *)(out_buf + pos);
           u16 num = 1 + rand_below(afl, ARITH_MAX);
 
 #ifdef INTROSPECTION
@@ -2268,6 +3381,8 @@ havoc_stage:
           *(u16 *)(out_buf + pos) =
               SWAP16(SWAP16(*(u16 *)(out_buf + pos)) + num);
 
+          }
+
           break;
 
         }
@@ -2276,15 +3391,23 @@ havoc_stage:
 
           /* Randomly subtract from dword, little endian. */
 
+          mutation_size = BYTE4;
+
           if (temp_len < 4) { break; }
 
+          for (i = 0; i < use_stacking; ++i) {
+
           u32 pos = rand_below(afl, temp_len - 3);
+          mutation_pos[i] = pos; 
+          mutation_data32[i] = *(u32 *)(out_buf + pos);
 
 #ifdef INTROSPECTION
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " ARITH32_-%u", pos);
           strcat(afl->mutation, afl->m_tmp);
 #endif
           *(u32 *)(out_buf + pos) -= 1 + rand_below(afl, ARITH_MAX);
+
+          }
 
           break;
 
@@ -2294,9 +3417,15 @@ havoc_stage:
 
           /* Randomly subtract from dword, big endian. */
 
+          mutation_size = BYTE4;
+
           if (temp_len < 4) { break; }
 
+          for (i = 0; i < use_stacking; ++i) {
+
           u32 pos = rand_below(afl, temp_len - 3);
+          mutation_pos[i] = pos; 
+          mutation_data32[i] = *(u32 *)(out_buf + pos);
           u32 num = 1 + rand_below(afl, ARITH_MAX);
 
 #ifdef INTROSPECTION
@@ -2307,6 +3436,8 @@ havoc_stage:
           *(u32 *)(out_buf + pos) =
               SWAP32(SWAP32(*(u32 *)(out_buf + pos)) - num);
 
+          }
+
           break;
 
         }
@@ -2315,15 +3446,23 @@ havoc_stage:
 
           /* Randomly add to dword, little endian. */
 
+          mutation_size = BYTE4;
+
           if (temp_len < 4) { break; }
 
+          for (i = 0; i < use_stacking; ++i) {
+
           u32 pos = rand_below(afl, temp_len - 3);
+          mutation_pos[i] = pos; 
+          mutation_data32[i] = *(u32 *)(out_buf + pos);
 
 #ifdef INTROSPECTION
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " ARITH32+-%u", pos);
           strcat(afl->mutation, afl->m_tmp);
 #endif
           *(u32 *)(out_buf + pos) += 1 + rand_below(afl, ARITH_MAX);
+
+          }
 
           break;
 
@@ -2333,9 +3472,15 @@ havoc_stage:
 
           /* Randomly add to dword, big endian. */
 
+          mutation_size = BYTE4;
+
           if (temp_len < 4) { break; }
 
+          for (i = 0; i < use_stacking; ++i) {
+
           u32 pos = rand_below(afl, temp_len - 3);
+          mutation_pos[i] = pos; 
+          mutation_data32[i] = *(u32 *)(out_buf + pos);
           u32 num = 1 + rand_below(afl, ARITH_MAX);
 
 #ifdef INTROSPECTION
@@ -2345,6 +3490,8 @@ havoc_stage:
 #endif
           *(u32 *)(out_buf + pos) =
               SWAP32(SWAP32(*(u32 *)(out_buf + pos)) + num);
+
+          }
 
           break;
 
@@ -2360,12 +3507,26 @@ havoc_stage:
           snprintf(afl->m_tmp, sizeof(afl->m_tmp), " RAND8");
           strcat(afl->mutation, afl->m_tmp);
 #endif
-          out_buf[rand_below(afl, temp_len)] ^= 1 + rand_below(afl, 255);
+
+          mutation_size = BYTE1;
+
+          for (i = 0; i < use_stacking; ++i) {
+
+          u32 pos = rand_below(afl, temp_len);
+          mutation_pos[i] = pos; 
+          mutation_data8[i] = out_buf[pos];
+
+          out_buf[pos] ^= 1 + rand_below(afl, 255);
+
+          }
+
           break;
 
         }
 
         case 44 ... 46: {
+
+          for (i = 0; i < use_stacking; ++i) {
 
           if (temp_len + HAVOC_BLK_XL < MAX_FILE) {
 
@@ -2400,6 +3561,8 @@ havoc_stage:
             afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
             temp_len += clone_len;
 
+          } else break;
+
           }
 
           break;
@@ -2407,6 +3570,8 @@ havoc_stage:
         }
 
         case 47: {
+
+          for (i = 0; i < use_stacking; ++i) {
 
           if (temp_len + HAVOC_BLK_XL < MAX_FILE) {
 
@@ -2443,6 +3608,8 @@ havoc_stage:
             afl_swap_bufs(AFL_BUF_PARAM(out), AFL_BUF_PARAM(out_scratch));
             temp_len += clone_len;
 
+          } else break;
+
           }
 
           break;
@@ -2454,6 +3621,8 @@ havoc_stage:
           /* Overwrite bytes with a randomly selected chunk bytes. */
 
           if (temp_len < 2) { break; }
+
+          for (i = 0; i < use_stacking; ++i) {
 
           u32 copy_len = choose_block_len(afl, temp_len - 1);
           u32 copy_from = rand_below(afl, temp_len - copy_len + 1);
@@ -2470,6 +3639,8 @@ havoc_stage:
 
           }
 
+          }
+
           break;
 
         }
@@ -2479,6 +3650,8 @@ havoc_stage:
           /* Overwrite bytes with fixed bytes. */
 
           if (temp_len < 2) { break; }
+
+          for (i = 0; i < use_stacking; ++i) {
 
           u32 copy_len = choose_block_len(afl, temp_len - 1);
           u32 copy_to = rand_below(afl, temp_len - copy_len + 1);
@@ -2493,12 +3666,16 @@ havoc_stage:
                                     : out_buf[rand_below(afl, temp_len)],
                  copy_len);
 
+          }
+
           break;
 
         }
 
         // increase from 4 up to 8?
         case 52 ... MAX_HAVOC_ENTRY: {
+
+          for (i = 0; i < use_stacking; ++i) {
 
           /* Delete bytes. We're making this a bit more likely
              than insertion (the next option) in hopes of keeping
@@ -2521,6 +3698,8 @@ havoc_stage:
 
           temp_len -= del_len;
 
+          }
+
           break;
 
         }
@@ -2532,6 +3711,8 @@ havoc_stage:
           if (afl->extras_cnt) {
 
             if (r < 2) {
+
+              for (i = 0; i < use_stacking; ++i) {
 
               /* Use the dictionary. */
 
@@ -2549,9 +3730,13 @@ havoc_stage:
               memcpy(out_buf + insert_at, afl->extras[use_extra].data,
                      extra_len);
 
+              }
+
               break;
 
             } else if (r < 4) {
+
+              for (i = 0; i < use_stacking; ++i) {
 
               u32 use_extra = rand_below(afl, afl->extras_cnt);
               u32 extra_len = afl->extras[use_extra].len;
@@ -2576,6 +3761,8 @@ havoc_stage:
               memcpy(out_buf + insert_at, ptr, extra_len);
               temp_len += extra_len;
 
+              }
+
               break;
 
             } else {
@@ -2589,6 +3776,8 @@ havoc_stage:
           if (afl->a_extras_cnt) {
 
             if (r < 2) {
+
+              for (i = 0; i < use_stacking; ++i) {
 
               /* Use the dictionary. */
 
@@ -2606,9 +3795,13 @@ havoc_stage:
               memcpy(out_buf + insert_at, afl->a_extras[use_extra].data,
                      extra_len);
 
+              }
+
               break;
 
             } else if (r < 4) {
+
+              for (i = 0; i < use_stacking; ++i) {
 
               u32 use_extra = rand_below(afl, afl->a_extras_cnt);
               u32 extra_len = afl->a_extras[use_extra].len;
@@ -2633,6 +3826,8 @@ havoc_stage:
               memcpy(out_buf + insert_at, ptr, extra_len);
               temp_len += extra_len;
 
+              }
+
               break;
 
             } else {
@@ -2642,6 +3837,8 @@ havoc_stage:
             }
 
           }
+
+          for (i = 0; i < use_stacking; ++i) {
 
           /* Splicing otherwise if we are still here.
              Overwrite bytes with a randomly selected chunk from another
@@ -2719,28 +3916,124 @@ havoc_stage:
 
           }
 
+          }
+
           break;
 
           // end of default
 
       }
 
-    }
 
-    if (common_fuzz_stuff(afl, out_buf, temp_len)) { goto abandon_entry; }
+#if MUT_ALG == exppp || MUT_ALG == expix
+L_EXP_INVALID:
+#endif
+
+    afl->fsrv.total_havocs++;
+
+#if MUT_ALG == exppp || MUT_ALG == expix
+    if (exp_invalid) goto L_EXP_INVALID_2;
+#endif
+
+    u8 should_abandon = common_fuzz_stuff(afl, out_buf, temp_len);
+    if (should_abandon) {
+#ifdef BATCHSIZE_BANDIT
+      ADD_REWARD(BATCH_ALG)(batch_bandit, selected_t, 0);
+#endif
+
+#if defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+      ADD_REWARD(MUT_ALG)(mut_bandit, selected_case, 0);
+#endif
+      goto abandon_entry; 
+    }
 
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
 
-    out_buf = afl_realloc(AFL_BUF_PARAM(out), len);
-    if (unlikely(!out_buf)) { PFATAL("alloc"); }
-    temp_len = len;
-    memcpy(out_buf, in_buf, len);
+    if (len >= MIN_LEN_FOR_OPTIMIZED_RESTORE) {
+
+      // For fine grained mutations, we recover the data from the saved one.
+      switch (mutation_size) {
+        // FLIP BIT
+        case BIT1: {
+          int j;
+          u32 pos;
+          for (j = use_stacking - 1; j >= 0; j--) {
+            pos = mutation_pos[j];
+            FLIP_BIT(out_buf, pos);
+          }
+          break;
+        }
+  
+        // case mutation size = 1 byte
+        case BYTE1: {
+          int j;
+          u32 pos;
+          u8  data;
+          for (j = use_stacking - 1; j >= 0; j--) {
+            pos = mutation_pos[j];
+            data = mutation_data8[j];
+            // printf("%u %u %u %u %u\n", mutation_id, i, r_bkup, pos, data);
+            out_buf[pos] = data;
+          }
+          break;
+        }
+  
+        // case mutation size = 2 bytes
+        case BYTE2: {
+          int j;
+          u32 pos;
+          u16 data;
+          if (temp_len < 2) { break; }
+          for (j = use_stacking - 1; j >= 0; j--) {
+            pos = mutation_pos[j];
+            data = mutation_data16[j];
+            // printf("%u %u %u %u %u\n", mutation_id, j, r_bkup, pos, data);
+            *(u16 *)(out_buf + pos) = data;
+          }
+          break;
+        }
+  
+        // case mutation size = 4 bytes
+        case BYTE4: {
+          int j;
+          u32 pos;
+          u32 data;
+          if (temp_len < 4) { break; }
+          for (j = use_stacking - 1; j >= 0; j--) {
+            pos = mutation_pos[j];
+            data = mutation_data32[j];
+            // printf("%u %u %u %u %u\n", mutation_id, j, r_bkup, mutation_pos[j], data);
+            *(u32 *)(out_buf + pos) = data;
+          }
+          break;
+        }
+  
+        default: {
+          out_buf = afl_realloc(AFL_BUF_PARAM(out), len);
+          if (unlikely(!out_buf)) { PFATAL("alloc"); }
+          temp_len = len;
+          memcpy(out_buf, in_buf, len);
+        }
+      }
+    } else {
+      out_buf = afl_realloc(AFL_BUF_PARAM(out), len);
+      if (unlikely(!out_buf)) { PFATAL("alloc"); }
+      temp_len = len;
+      memcpy(out_buf, in_buf, len);
+    }
 
     /* If we're finding new stuff, let's run for a bit longer, limits
        permitting. */
 
     if (afl->queued_paths != havoc_queued) {
+#ifdef BATCHSIZE_BANDIT
+      ADD_REWARD(BATCH_ALG)(batch_bandit, selected_t, 1);
+#endif
+
+#if defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+      ADD_REWARD(MUT_ALG)(mut_bandit, selected_case, 1);
+#endif
 
       if (perf_score <= afl->havoc_max_mult * 100) {
 
@@ -2750,9 +4043,21 @@ havoc_stage:
       }
 
       havoc_queued = afl->queued_paths;
+    }  else {
+
+#ifdef BATCHSIZE_BANDIT
+      ADD_REWARD(BATCH_ALG)(batch_bandit, selected_t, 0);
+#endif
+
+#if MUT_ALG == exppp || MUT_ALG == expix
+L_EXP_INVALID_2:
+#endif
+
+#if defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+      ADD_REWARD(MUT_ALG)(mut_bandit, selected_case, 0);
+#endif
 
     }
-
   }
 
   new_hit_cnt = afl->queued_paths + afl->unique_crashes;

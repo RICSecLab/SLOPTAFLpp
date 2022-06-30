@@ -26,6 +26,9 @@
 #include "afl-fuzz.h"
 #include "envs.h"
 
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+
 s8  interesting_8[] = {INTERESTING_8};
 s16 interesting_16[] = {INTERESTING_8, INTERESTING_16};
 s32 interesting_32[] = {INTERESTING_8, INTERESTING_16, INTERESTING_32};
@@ -33,6 +36,81 @@ s32 interesting_32[] = {INTERESTING_8, INTERESTING_16, INTERESTING_32};
 char *power_names[POWER_SCHEDULES_NUM] = {"explore", "mmopt", "exploit",
                                           "fast",    "coe",   "lin",
                                           "quad",    "rare",  "seek"};
+
+void expix_init(afl_state_t *afl, expix_t *v, u64 n_arms) {
+  v->weights = calloc(sizeof(double), n_arms);
+  v->losses = calloc(sizeof(double), n_arms);
+  v->pulls = calloc(sizeof(u64), n_arms);
+  v->total_rewards = calloc(sizeof(u64), n_arms);
+
+  v->t = 0;
+  v->n_arms = n_arms;
+  for (u64 i = 0; i < n_arms ; i++) {
+    v->weights[i] = 1.0 / (double)n_arms;
+  }
+}
+
+void exppp_init(afl_state_t *afl, exppp_t *v, u64 n_arms) {
+  v->n_arms = n_arms;
+
+  v->weights = calloc(sizeof(double), n_arms);
+  v->losses = calloc(sizeof(double), n_arms);
+  v->unweighted_losses = calloc(sizeof(double), n_arms);
+  v->pulls = calloc(sizeof(u64), n_arms);
+  v->total_rewards = calloc(sizeof(u64), n_arms);
+  v->trusts = calloc(sizeof(double), n_arms);
+
+  for (u64 i = 0; i < n_arms; i++) {
+    v->weights[i] = 1.0 / (double)n_arms;
+    v->losses[i] = (double)n_arms;
+    v->unweighted_losses[i] = 1;
+    v->pulls[i] = 1;
+    v->trusts[i] = 1.0 / (double)n_arms;
+  }
+  v->t = n_arms;
+}
+
+void uniform_init(afl_state_t *afl, uniform_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->arms = calloc(sizeof(uniform_bandit_arm), n_arms);
+}
+
+void ucb_init(afl_state_t *afl, ucb_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->time_step = 0;
+  v->arms = calloc(sizeof(normal_bandit_arm), n_arms);
+}
+
+void klucb_init(afl_state_t *afl, klucb_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->time_step = 0;
+  v->arms = calloc(sizeof(normal_bandit_arm), n_arms);
+}
+
+void ts_init(afl_state_t *afl, ts_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->arms = calloc(sizeof(normal_bandit_arm), n_arms);
+}
+
+void adsts_init(afl_state_t *afl, adsts_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->arms = calloc(sizeof(adwin_bandit_arm), n_arms);
+
+  int i;
+  for (i=0; i<n_arms; i++) {
+    init_adwin(&v->arms[i].adwin);
+  }
+}
+
+void dts_init(afl_state_t *afl, dts_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->arms = calloc(sizeof(dts_bandit_arm), n_arms);
+}
+
+void dbe_init(afl_state_t *afl, dbe_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->arms = calloc(sizeof(dbe_bandit_arm), n_arms);
+}
 
 /* Initialize MOpt "globals" for this afl state */
 
@@ -95,7 +173,11 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->stage_name = "init";             /* Name of the current fuzz stage   */
   afl->splicing_with = -1;              /* Splicing with which test case?   */
   afl->cpu_to_bind = -1;
+#ifdef BATCHSIZE_BANDIT
+  afl->havoc_stack_pow2 = BATCH_NUM_ARM-1; 
+#else
   afl->havoc_stack_pow2 = HAVOC_STACK_POW2;
+#endif
   afl->hang_tmout = EXEC_TIMEOUT;
   afl->exit_on_time = 0;
   afl->stats_update_freq = 1;
@@ -112,6 +194,31 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->cpu_aff = -1;                    /* Selected CPU core                */
 #endif                                                     /* HAVE_AFFINITY */
 
+  gsl_rng_env_setup();
+  afl->gsl_rng_state = gsl_rng_alloc (gsl_rng_default);
+
+  {
+    int i;
+
+#ifdef BATCHSIZE_BANDIT
+    for (i=0; i<NUM_BATCH_BUCKET; i++) {
+      int j;
+      for (j=0; j<NUM_CASE; j++) {
+        INIT_INSTANCE(BATCH_ALG) (afl, &afl->batch_bandit[i][j], BATCH_NUM_ARM);
+      }
+    }
+#endif
+
+    for (i=0; i<NUM_MUT_BUCKET; i++) {
+#if   defined(MOPTWISE_BANDIT)
+      INIT_INSTANCE(MUT_ALG) (afl, &afl->mut_bandit[i], NUM_CASE);
+#elif defined(MOPTWISE_BANDIT_FINECOARSE)
+      INIT_INSTANCE(MUT_ALG) (afl, &afl->mut_bandit[i], 2);
+#endif
+    }
+  }
+
+  afl->virgin_bits = ck_alloc(map_size);
   afl->virgin_bits = ck_alloc(map_size);
   afl->virgin_tmout = ck_alloc(map_size);
   afl->virgin_crash = ck_alloc(map_size);
@@ -554,6 +661,28 @@ void afl_state_deinit(afl_state_t *afl) {
   afl_free(afl->in_buf);
   afl_free(afl->in_scratch_buf);
   afl_free(afl->ex_buf);
+
+// Just my laziness...
+#if 0
+  {
+    int i;
+
+#ifdef BATCHSIZE_BANDIT
+    for (i=0; i<NUM_BATCH_BUCKET; i++) {
+      int j;
+      for (j=0; j<NUM_CASE; j++) {
+        DEST_INSTANCE(BATCH_ALG) (afl, &afl->batch_bandit[i][j]);
+      }
+    }
+#endif
+
+#if defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+    for (i=0; i<NUM_MUT_BUCKET; i++) {
+      DEST_INSTANCE(MUT_ALG) (afl, &afl->mut_bandit[i]);
+    }
+#endif
+  }
+#endif
 
   ck_free(afl->virgin_bits);
   ck_free(afl->virgin_tmout);

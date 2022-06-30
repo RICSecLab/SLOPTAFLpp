@@ -27,6 +27,85 @@
 #include "envs.h"
 #include <limits.h>
 
+void uniform_print_arm(FILE* file, uniform_t* inst) {
+  int i;
+  int n = inst->n_arms;
+  uniform_bandit_arm *arms = inst->arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", arms[i].total_rewards, arms[i].num_selected);
+  }
+}
+
+void ucb_print_arm(FILE* file, ucb_t* inst) {
+  int i;
+  int n = inst->n_arms;
+  normal_bandit_arm *arms = inst->arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", arms[i].total_rewards, arms[i].num_selected);
+  }
+}
+
+void klucb_print_arm(FILE* file, klucb_t* inst) {
+  int i;
+  int n = inst->n_arms;
+  normal_bandit_arm *arms = inst->arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", arms[i].total_rewards, arms[i].num_selected);
+  }
+}
+
+void ts_print_arm(FILE* file, ts_t* inst) {
+  int i;
+  int n = inst->n_arms;
+  normal_bandit_arm *arms = inst->arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", arms[i].total_rewards, arms[i].num_selected);
+  }
+}
+
+void adsts_print_arm(FILE* file, adsts_t* inst) {
+  int i;
+  int n = inst->n_arms;
+  adwin_bandit_arm *arms = inst->arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", arms[i].total_rewards, arms[i].num_selected);
+  }
+}
+
+void dts_print_arm(FILE* file, dts_t* inst) {
+  int i;
+  int n = inst->n_arms;
+  dts_bandit_arm *arms = inst->arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", arms[i].num_rewarded, arms[i].num_selected);
+  }
+}
+
+void dbe_print_arm(FILE* file, dbe_t* inst) {
+  int i;
+  int n = inst->n_arms;
+  dbe_bandit_arm *arms = inst->arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", arms[i].num_rewarded, arms[i].num_selected);
+  }
+}
+
+void expix_print_arm(FILE* file, expix_t* inst) {
+  u64 i;
+  u64 n = inst->n_arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", inst->total_rewards[i], inst->pulls[i]);
+  }
+}
+
+void exppp_print_arm(FILE* file, exppp_t* inst) {
+  u64 i;
+  u64 n = inst->n_arms;
+  for (i=0; i<n; i++) {
+    fprintf(file, ", %llu, %llu", inst->total_rewards[i], inst->pulls[i]);
+  }
+}
+
 /* Write fuzzer setup file */
 
 void write_setup_file(afl_state_t *afl, u32 argc, char **argv) {
@@ -185,6 +264,40 @@ void load_stats_file(afl_state_t *afl) {
 
 }
 
+void print_indent(FILE *f, int indent) {
+  for (int i = 0; i < indent; i++) {
+    fprintf(f, " ");
+  }
+}
+
+void exppp_print_state(exppp_t *self, FILE *f, int indent) {
+  //printf("sum_of_trusts: %lf\n", sum_of_trusts);
+  print_indent(f, indent); fprintf(f, "- weights: ");
+  for (u64 i = 0; i < self->n_arms; i++) {
+	  fprintf(f, "%.6f\t", self->weights[i]);
+  }
+  fprintf(f, "\n");
+
+  print_indent(f, indent); fprintf(f, "- pulls: ");
+  for (u64 i = 0; i < self->n_arms; i++) {
+	  fprintf(f, "%lld\t", self->pulls[i]);
+  }
+  fprintf(f, "\n");
+
+  print_indent(f, indent); fprintf(f, "- trusts: ");
+  for (u64 i = 0; i < self->n_arms; i++) {
+	  fprintf(f, "%.6lf\t", self->trusts[i]);
+  }
+  fprintf(f, "\n");
+
+  print_indent(f, indent); fprintf(f, "- losses: ");
+  for (u64 i = 0; i < self->n_arms; i++) {
+	  fprintf(f, "%.6lf\t", self->losses[i]);
+  }
+  fprintf(f, "\n");
+}
+
+
 /* Update stats file for unattended monitoring. */
 
 void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
@@ -321,6 +434,121 @@ void write_stats_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
               : "default",
           afl->orig_cmdline);
 
+#ifndef DISABLE_BANDIT_STAT
+
+  fprintf(f, "bandit arms : batchbuck=%d mutbuck=%d mopt=%s mutalg=%s batalg=%s batch=%s\n", 
+    NUM_BATCH_BUCKET,
+    NUM_MUT_BUCKET,
+#ifdef MOPTWISE_BANDIT
+    "all",
+#elif defined(MOPTWISE_BANDIT_FINECOARSE)
+    "fine-coarse"
+#else
+    "none",
+#endif
+
+#if defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+    ##MUT_ALG ,
+#else
+     "none",
+#endif
+
+#if defined(BATCHSIZE_BANDIT)
+    ##BATCH_ALG ,
+#else
+     "none",
+#endif
+
+#ifdef ATOMIZE_CASES
+    "all",
+#elif defined(DIVIDE_COARSE_FINE)
+    "fine-coarse",
+#else
+    "none",
+#endif
+  );
+  int i;
+  char buf[100];
+
+#if defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+  for (i=0; i<NUM_MUT_BUCKET; i++) {
+    PRINT_STATE(MUT_ALG) (&afl->mut_bandit[i], f, 4);
+  }
+#if 0
+  for (i=0; i<NUM_MUT_BUCKET; i++) {
+    fprintf(f, " - bucket %02d\n", i);
+
+#ifdef MOPTWISE_BANDIT
+    const int jlim = NUM_CASE_ENUM;
+#else
+    const int jlim = 2;
+#endif
+
+  for (i=0; i<lim; i++) {
+    fprintf(f, " - mutate %02d\n", i);
+    int j;
+    for (j=0; j<jlim; j++) {
+      fprintf(f, "  - mutate %02d\n", j);
+#ifdef NONSTATIONARY_BANDIT
+      fprintf(f, "     %.6f%%(%llu / %llu)\n", adwin_get_estimation(&afl->mut_arms[i][j].adwin), afl->mut_arms[i][j].adwin.sum, afl->mut_arms[i][j].adwin.W);
+#elif defined(DISCOUNTED_THOMPSON_SAMPLING)
+      double tot = afl->mut_arms[i][j].total_rewards + afl->mut_arms[i][j].total_losses;
+      fprintf(f, "     %.6f%%(%f / %f, %llu)\n", afl->mut_arms[i][j].total_rewards / tot, afl->mut_arms[i][j].total_rewards, tot, afl->mut_arms[i][j].num_selected);
+#else
+      fprintf(f, "     %.6f%%(%llu / %llu)\n", afl->mut_arms[i][j].sample_mean, afl->mut_arms[i][j].total_rewards, afl->mut_arms[i][j].num_selected);
+#endif
+    }
+  }
+// END EXPPP || EXPIX
+#endif 
+// END defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+#endif
+
+  for (i=0; i<NUM_BATCH_BUCKET; i++) {
+    fprintf(f, " - bucket %02d\n", i);
+    
+    int j;
+    for (j=0; j<NUM_CASE; j++) {
+
+      fprintf(f, "    mutate %02d:\n", j);
+      PRINT_STATE(BATCH_ALG)(&afl->batch_bandit[i][j], f, 6);
+
+      #if 0
+      int k;
+      u8 all_zero = 1;
+      for (k=0; k<=afl->havoc_stack_pow2; k++) {
+#ifdef NONSTATIONARY_BANDIT
+        if (afl->arms[i][j][k].adwin.W > 0) {
+#else
+        if (afl->arms[i][j][k].num_selected > 0) {
+#endif
+          all_zero = 0;
+          break;
+        }
+      }
+
+      if (all_zero) continue;
+
+      fprintf(f, "    mutate %02d:", j);
+
+      for (k=0; k<=afl->havoc_stack_pow2; k++) {
+#ifdef NONSTATIONARY_BANDIT
+        sprintf(buf, "%.6f%%(%llu / %llu)", adwin_get_estimation(&afl->arms[i][j][k].adwin), afl->arms[i][j][k].adwin.sum, afl->arms[i][j][k].adwin.W);
+#elif defined(DISCOUNTED_THOMPSON_SAMPLING)
+        double tot = afl->arms[i][j][k].total_rewards + afl->arms[i][j][k].total_losses;
+        sprintf(buf, "%.6f%%(%f / %f, %llu)", afl->arms[i][j][k].total_rewards / tot, afl->arms[i][j][k].total_rewards, tot, afl->arms[i][j][k].num_selected);
+#else
+        sprintf(buf, "%.6f%%(%llu / %llu)", afl->arms[i][j][k].sample_mean, afl->arms[i][j][k].total_rewards, afl->arms[i][j][k].num_selected);
+#endif
+        fprintf(f, "%25s", buf);
+      }
+      fprintf(f, "\n");
+      #endif
+    }
+  }
+
+#endif /* DISABLE_BANDIT_STAT */
+
   /* ignore errors */
 
   if (afl->debug) {
@@ -390,19 +618,35 @@ void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 
      relative_time, afl->cycles_done, cur_path, paths_total, paths_not_fuzzed,
      favored_not_fuzzed, unique_crashes, unique_hangs, max_depth,
-     execs_per_sec, edges_found */
+     execs_per_sec, edges_found, total_havocs, arms... */
 
   fprintf(afl->fsrv.plot_file,
           "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %llu, "
-          "%u\n",
+          "%u, %llu",
           ((afl->prev_run_time + get_cur_time() - afl->start_time) / 1000),
           afl->queue_cycle - 1, afl->current_entry, afl->queued_paths,
           afl->pending_not_fuzzed, afl->pending_favored, bitmap_cvg,
           afl->unique_crashes, afl->unique_hangs, afl->max_depth, eps,
-          afl->plot_prev_ed, t_bytes);                     /* ignore errors */
+          afl->plot_prev_ed, t_bytes, afl->fsrv.total_havocs);  /* ignore errors */
+ 
+  int i;
+#if defined(MOPTWISE_BANDIT) || defined(MOPTWISE_BANDIT_FINECOARSE)
+  for (i=0; i<NUM_MUT_BUCKET; i++) {
+    PRINT_ARM(MUT_ALG)(afl->fsrv.plot_file, &afl->mut_bandit[i]);
+  }
+#endif
 
+#ifdef BATCHSIZE_BANDIT
+  for (i=0; i<NUM_BATCH_BUCKET; i++) {
+    int j;
+    for (j=0; j<NUM_CASE; j++) {
+      PRINT_ARM(BATCH_ALG)(afl->fsrv.plot_file, &afl->batch_bandit[i][j]);
+    }
+  }
+#endif
+
+  fprintf(afl->fsrv.plot_file, "\n");
   fflush(afl->fsrv.plot_file);
-
 }
 
 /* Check terminal dimensions after resize. */
