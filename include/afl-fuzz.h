@@ -37,6 +37,9 @@
   #define _FILE_OFFSET_BITS 64
 #endif
 
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+
 #include "config.h"
 #include "types.h"
 #include "debug.h"
@@ -150,6 +153,8 @@ struct tainted {
 
 };
 
+#define DIM_CTX 8
+
 struct queue_entry {
 
   u8 *fname;                            /* File name for the test case      */
@@ -194,6 +199,7 @@ struct queue_entry {
 
   struct queue_entry *mother;           /* queue entry this based on        */
 
+  double *ucb_ctx; //[DIM_CTX];
 };
 
 struct extra_data {
@@ -410,7 +416,53 @@ struct foreign_sync {
 
 };
 
+#define LINUCB_MATINV_EPS 1e-8
+#define LINUCB_NMF_EPS 1e-8
+#define LINUCB_ALPHA 0.1
+
+enum HavocCase {
+  FLIP_BIT1 = 0, 
+  INTERESTING8 = 1,
+  INTERESTING16 = 2,
+  INTERESTING16BE = 3,
+  INTERESTING32 = 4,
+  INTERESTING32BE = 5,
+  ARITH8_MINUS = 6,
+  ARITH8_PLUS = 7,
+  ARITH16_MINUS = 8, 
+  ARITH16_BE_MINUS = 9,
+  ARITH16_PLUS = 10,
+  ARITH16_BE_PLUS = 11,
+  ARITH32_MINUS = 12,
+  ARITH32_BE_MINUS = 13,
+  ARITH32_PLUS = 14,
+  ARITH32_BE_PLUS = 15,
+  RAND8 = 16, 
+  CLONE_BYTES = 17,
+  INSERT_SAME_BYTE = 18, 
+  OVERWRITE_WITH_CHUNK = 19, 
+  OVERWRITE_WITH_SAME_BYTE = 20,
+  DELETE_BYTES = 21,
+  OVERWRITE_WITH_EXTRA = 22,
+  INSERT_EXTRA = 23,
+  OVERWRITE_WITH_AEXTRA = 24,
+  INSERT_AEXTRA = 25,
+  SPLICE_OVERWRITE = 26,
+  SPLICE_INSERT = 27,
+  NUM_CASE_ENUM // this represents the number of members
+};
+
+typedef struct bandit_arm {
+  double A[DIM_CTX][DIM_CTX];
+  double b[DIM_CTX];
+  u64 num_selected;
+  u64 total_rewards;
+} bandit_arm_t;
+
 typedef struct afl_state {
+
+  bandit_arm_t mut_arms[NUM_CASE_ENUM];
+  gsl_rng* gsl_rng_state;
 
   /* Position of this state in the global states list */
   u32 _id;

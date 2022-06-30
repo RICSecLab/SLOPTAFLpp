@@ -27,6 +27,213 @@
 #include <string.h>
 #include <limits.h>
 #include "cmplog.h"
+#include <math.h>
+
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+
+static inline void mat_inv(double A_inv[DIM_CTX][DIM_CTX], double _A[DIM_CTX][DIM_CTX]) {
+  double A[DIM_CTX][DIM_CTX];
+  u8 used[DIM_CTX];
+
+L_START:
+
+  memset(used, 0, sizeof(used));
+  for (int i=0; i<DIM_CTX; i++) {
+    for (int j=0; j<DIM_CTX; j++) {
+      A[i][j] = _A[i][j];
+      A_inv[i][j] = i == j;
+    }
+  }
+ 
+  for (int k=0; k<DIM_CTX; k++) {
+    char found = 0;
+    for (int i=0; i<DIM_CTX; i++) {
+      if (used[i]) continue;
+
+      double v = A[i][k];
+      if (fabs(v) < LINUCB_MATINV_EPS) continue;
+
+      used[i] = 1;
+      found = 1;
+
+      for (int j=k; j<DIM_CTX; j++) {
+        A[i][j] /= v;
+      }
+
+      for (int j=0; j<DIM_CTX; j++) {
+        A_inv[i][j] /= v;
+      }
+
+      for (int p=0; p<DIM_CTX; p++) {
+        if (p == i) continue;
+
+        double u = A[p][k];
+        for (int j=k; j<DIM_CTX; j++) {
+          A[p][j] -= u * A[i][j];
+        }
+
+        for (int j=0; j<DIM_CTX; j++) {
+          A_inv[p][j] -= u * A_inv[i][j];
+        }
+      }
+
+      break;   
+    }
+
+    if (!found) {
+      for (int i=0; i<DIM_CTX; i++) {
+        if (used[i]) continue;
+
+        // perturb by epsilon
+        _A[i][k] += LINUCB_MATINV_EPS;
+        goto L_START;
+      }
+    }
+  }
+}
+
+double mat_euc_dist(double (*V)[DIM_CTX], double *W, double *H, int n) {
+  double ret = 0;
+  for (int i=0; i<n; i++) {
+    for (int j=0; j<DIM_CTX; j++) {
+      double d = V[i][j] - W[i] * H[j];
+      ret += d*d;
+    }
+  }
+  return ret;
+}
+
+double* nmf_seed(afl_state_t *afl, u8 *buf, int len) {
+  int n = len/DIM_CTX + (len%DIM_CTX != 0);
+  double (*V)[DIM_CTX] = malloc(n * DIM_CTX * sizeof(double));
+  if (!V) FATAL("malloc failed in nmf_seed");
+
+  for (int i=0; i<n; i++) {
+    for (int j=0; j<DIM_CTX; j++) {
+      int k = i*DIM_CTX + j;
+      if (k < len) V[i][j] = buf[k];
+      else V[i][j] = 0;
+    }
+  }
+
+  double *W = calloc(n, sizeof(double));
+  double *H = calloc(DIM_CTX, sizeof(double));
+  double *W2 = calloc(n, sizeof(double));
+  double *H2 = calloc(DIM_CTX, sizeof(double));
+  if (!(W && H && W2 && H2)) FATAL("calloc failed in nmf_seed");
+
+  for (int i=0; i<n; i++) {
+    W[i] = gsl_rng_uniform_pos(afl->gsl_rng_state);
+  }
+
+  for (int i=0; i<DIM_CTX; i++) {
+    H[i] = gsl_rng_uniform_pos(afl->gsl_rng_state);
+  }
+
+  // As you may notice, V and WH cannot be much close when r = 1...
+  // (e.g. consider the case where V contains 0 and non-zero values in the same rows and columns)
+  // Consequently, the context calculated this way may be too noisy.
+  for (int t=0; t<30; t++) {
+    if (mat_euc_dist(V, W, H, n) <= LINUCB_NMF_EPS) break;
+
+    double *tmp;
+
+    for (int i=0; i<n; i++) {
+      double vh = 0;
+      double whh = 0;
+      for (int j=0; j<DIM_CTX; j++) {
+        vh  += V[i][j] * H[j];
+        whh += W[i] * H[j] * H[j];
+      }
+      if (fabs(whh) < LINUCB_NMF_EPS) whh = LINUCB_NMF_EPS;
+      W2[i] = W[i] * vh / whh;
+    }
+    tmp = W;
+    W = W2;
+    W2 = tmp;
+
+    for (int j=0; j<DIM_CTX; j++) {
+      double wv = 0;
+      double wwh = 0;
+      for (int i=0; i<n; i++) {
+        wv += W[i] * V[i][j];
+        wwh += W[i] * W[i] * H[j];
+      }
+      if (fabs(wwh) < LINUCB_NMF_EPS) wwh = LINUCB_NMF_EPS;
+      H2[j] = H[j] * wv / wwh;
+    }
+    tmp = H;
+    H = H2;
+    H2 = tmp;
+  }
+
+  free(W);
+  free(W2);
+  free(H2);
+
+  return H;
+}
+
+// Usually LinUCB assumes reward distributions as normal distributions (nothing about rewards was written).
+static inline void bandit_add_reward(bandit_arm_t* arm, u8 r, bandit_arm_t* all_arms, u32 num, double* ctx) {
+  arm->num_selected++;
+  arm->total_rewards += r;
+
+  for (int i=0; i<DIM_CTX; i++) {
+    for (int j=0; j<DIM_CTX; j++) {
+      arm->A[i][j] += ctx[i] * ctx[j];
+    }
+  }
+
+  if (r == 0) return;
+
+  // r = 1
+  for (int i=0; i<DIM_CTX; i++) {
+    arm->b[i] += ctx[i];
+  }
+}
+
+int linucb_select_arm(afl_state_t *afl, bandit_arm_t* slots, int n, u8* mask, double* ctx) {
+  int i;
+  int selected_idx = -1;
+  double max_p = -1;
+  
+  double A_inv[DIM_CTX][DIM_CTX];
+
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+
+    if (slots[i].num_selected == 0) return i;
+
+    mat_inv(A_inv, slots[i].A);
+
+    double p = 0;
+    for (int j=0; j<DIM_CTX; j++) {
+      double theta_j = 0;
+      for (int k=0; k<DIM_CTX; k++) {
+        theta_j += A_inv[j][k] * slots[i].b[k];
+      }
+      p += theta_j * ctx[j];
+    }
+
+    double sqrt_arg = 0;
+    for (int j=0; j<DIM_CTX; j++) {
+      for (int k=0; k<DIM_CTX; k++) {
+        sqrt_arg += A_inv[j][k] * ctx[j] * ctx[k];
+      }
+    }
+    if (sqrt_arg < 0) sqrt_arg = 0;
+    p += LINUCB_ALPHA * sqrt(sqrt_arg);
+
+    if (selected_idx == -1 || p > max_p) {
+      max_p = p;
+      selected_idx = i;
+    }
+  }
+
+  return selected_idx;
+}
 
 /* MOpt */
 
@@ -462,6 +669,12 @@ u8 fuzz_one_original(afl_state_t *afl) {
 
   out_buf = afl_realloc(AFL_BUF_PARAM(out), len);
   if (unlikely(!out_buf)) { PFATAL("alloc"); }
+
+  double *ucb_ctx;
+  if (!afl->queue_cur->ucb_ctx) {
+    afl->queue_cur->ucb_ctx = nmf_seed(afl, out_buf, len);
+  }
+  ucb_ctx = afl->queue_cur->ucb_ctx;
 
   afl->subseq_tmouts = 0;
 
@@ -2023,9 +2236,12 @@ havoc_stage:
 
   }
 
+  u8 mask[NUM_CASE_ENUM] = { 0 };
+  int selected_case[4];
+
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
-    u32 use_stacking = 1 << (1 + rand_below(afl, afl->havoc_stack_pow2));
+    const u32 use_stacking = 4; //1 << (1 + rand_below(afl, afl->havoc_stack_pow2));
 
     afl->stage_cur_val = use_stacking;
 
@@ -2035,6 +2251,32 @@ havoc_stage:
 #endif
 
     for (i = 0; i < use_stacking; ++i) {
+
+      memset(mask, 0, sizeof(mask));
+
+      if (!afl->extras_cnt) {
+        mask[OVERWRITE_WITH_EXTRA] = 1;
+        mask[INSERT_EXTRA] = 1;
+      }
+
+      if (!afl->a_extras_cnt) {
+        mask[OVERWRITE_WITH_AEXTRA] = 1;
+        mask[INSERT_AEXTRA] = 1;
+      }
+
+      if (afl->ready_for_splicing_count <= 1) {
+        mask[SPLICE_INSERT] = 1;
+        mask[SPLICE_OVERWRITE] = 1;
+      }
+
+      if (len < 2) {
+        mask[SPLICE_OVERWRITE] = 1;
+      }
+
+      // this is not enough to handle splice_insert, but ignore it for the time being
+      if (len + HAVOC_BLK_XL >= MAX_FILE) {
+        mask[SPLICE_INSERT] = 1;
+      }
 
       if (afl->custom_mutators_count) {
 
@@ -2071,7 +2313,27 @@ havoc_stage:
 
       }
 
-      switch ((r = rand_below(afl, r_max))) {
+      selected_case[i] = linucb_select_arm(afl,
+                                           afl->mut_arms,
+                                           NUM_CASE_ENUM,
+                                           mask,
+                                           ucb_ctx);
+          
+      static const int case2r[] = {
+        0, 4, 8, 10, 12, 14, 16, 20, 24, 26, 28, 30, 32, 34, 36, 38, 40, 44, 47, 48, 51, 52, MAX_HAVOC_ENTRY+1,
+        MAX_HAVOC_ENTRY+3, MAX_HAVOC_ENTRY+5, MAX_HAVOC_ENTRY+7, MAX_HAVOC_ENTRY+10, MAX_HAVOC_ENTRY+9
+      };
+
+      r = case2r[selected_case[i]];
+      if (selected_case[i] >= OVERWRITE_WITH_AEXTRA) {
+        if (!afl->extras_cnt) r -= 4;
+      }
+
+      if (selected_case[i] >= SPLICE_OVERWRITE) {
+        if (!afl->a_extras_cnt) r -= 4;
+      }
+
+      switch (r) {
 
         case 0 ... 3: {
 
@@ -2727,7 +2989,17 @@ havoc_stage:
 
     }
 
-    if (common_fuzz_stuff(afl, out_buf, temp_len)) { goto abandon_entry; }
+    afl->fsrv.total_havocs++;
+
+    u8 should_abandon = common_fuzz_stuff(afl, out_buf, temp_len);
+    if (should_abandon) {
+
+      for (i = 0; i < use_stacking; ++i) {
+        bandit_add_reward(&afl->mut_arms[selected_case[i]], 0, afl->mut_arms, NUM_CASE_ENUM, ucb_ctx);
+      }
+
+      goto abandon_entry;
+    }
 
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
@@ -2742,6 +3014,10 @@ havoc_stage:
 
     if (afl->queued_paths != havoc_queued) {
 
+      for (i = 0; i < use_stacking; ++i) {
+        bandit_add_reward(&afl->mut_arms[selected_case[i]], 1, afl->mut_arms, NUM_CASE_ENUM, ucb_ctx);
+      }
+
       if (perf_score <= afl->havoc_max_mult * 100) {
 
         afl->stage_max *= 2;
@@ -2751,8 +3027,14 @@ havoc_stage:
 
       havoc_queued = afl->queued_paths;
 
-    }
+    } else {
 
+      for (i = 0; i < use_stacking; ++i) {
+        bandit_add_reward(&afl->mut_arms[selected_case[i]], 0, afl->mut_arms, NUM_CASE_ENUM, ucb_ctx);
+      }
+
+    }
+    
   }
 
   new_hit_cnt = afl->queued_paths + afl->unique_crashes;

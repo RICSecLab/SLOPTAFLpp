@@ -390,17 +390,22 @@ void maybe_update_plot_file(afl_state_t *afl, u32 t_bytes, double bitmap_cvg,
 
      relative_time, afl->cycles_done, cur_path, paths_total, paths_not_fuzzed,
      favored_not_fuzzed, unique_crashes, unique_hangs, max_depth,
-     execs_per_sec, edges_found */
+     execs_per_sec, edges_found, total_havocs */
 
   fprintf(afl->fsrv.plot_file,
           "%llu, %llu, %u, %u, %u, %u, %0.02f%%, %llu, %llu, %u, %0.02f, %llu, "
-          "%u\n",
+          "%u, %llu",
           ((afl->prev_run_time + get_cur_time() - afl->start_time) / 1000),
           afl->queue_cycle - 1, afl->current_entry, afl->queued_paths,
           afl->pending_not_fuzzed, afl->pending_favored, bitmap_cvg,
           afl->unique_crashes, afl->unique_hangs, afl->max_depth, eps,
-          afl->plot_prev_ed, t_bytes);                     /* ignore errors */
+          afl->plot_prev_ed, t_bytes, afl->fsrv.total_havocs); /* ignore errors */
 
+  for (int i=0; i<NUM_CASE_ENUM; i++) {
+    fprintf(afl->fsrv.plot_file, ", %llu, %llu", afl->mut_arms[i].total_rewards, afl->mut_arms[i].num_selected);
+  }
+
+  fprintf(afl->fsrv.plot_file, "\n");
   fflush(afl->fsrv.plot_file);
 
 }

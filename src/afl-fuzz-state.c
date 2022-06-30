@@ -122,6 +122,14 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->first_trace = ck_alloc(map_size);
   afl->map_tmp_buf = ck_alloc(map_size);
 
+  gsl_rng_env_setup();
+  afl->gsl_rng_state = gsl_rng_alloc (gsl_rng_default);
+  for (int k=0; k<NUM_CASE_ENUM; k++) {
+    for (int i=0; i<DIM_CTX; i++) {
+      afl->mut_arms[k].A[i][i] = 1;
+    }
+  }
+
   afl->fsrv.use_stdin = 1;
   afl->fsrv.map_size = map_size;
   // afl_state_t is not available in forkserver.c
