@@ -37,6 +37,9 @@
   #define _FILE_OFFSET_BITS 64
 #endif
 
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+
 #include "config.h"
 #include "types.h"
 #include "debug.h"
@@ -410,7 +413,64 @@ struct foreign_sync {
 
 };
 
+enum HavocCase {
+  FLIP_BIT1 = 0, 
+  INTERESTING8 = 1,
+  INTERESTING16 = 2,
+  INTERESTING16BE = 3,
+  INTERESTING32 = 4,
+  INTERESTING32BE = 5,
+  ARITH8_MINUS = 6,
+  ARITH8_PLUS = 7,
+  ARITH16_MINUS = 8, 
+  ARITH16_BE_MINUS = 9,
+  ARITH16_PLUS = 10,
+  ARITH16_BE_PLUS = 11,
+  ARITH32_MINUS = 12,
+  ARITH32_BE_MINUS = 13,
+  ARITH32_PLUS = 14,
+  ARITH32_BE_PLUS = 15,
+  RAND8 = 16, 
+  CLONE_BYTES = 17,
+  INSERT_SAME_BYTE = 18, 
+  OVERWRITE_WITH_CHUNK = 19, 
+  OVERWRITE_WITH_SAME_BYTE = 20,
+  DELETE_BYTES = 21,
+  OVERWRITE_WITH_EXTRA = 22,
+  INSERT_EXTRA = 23,
+  OVERWRITE_WITH_AEXTRA = 24,
+  INSERT_AEXTRA = 25,
+  SPLICE_OVERWRITE = 26,
+  SPLICE_INSERT = 27,
+  NUM_CASE_ENUM // this represents the number of members
+};
+
+typedef struct {
+  u64 num_selected;
+  u64 total_rewards;
+  double sample_mean;
+} normal_bandit_arm;
+
+typedef struct {
+  int n_arms;
+  normal_bandit_arm* arms;
+} ts_t;
+
+#define ____CONCAT(a, b) a ## b
+#define CONCAT(a, b) ____CONCAT(a, b)
+#define BANDIT_T(alg) CONCAT(alg, _t)
+#define INIT_INSTANCE(alg) CONCAT(alg, _init)
+#define SELECT_ARM(alg) CONCAT(alg, _select_arm)
+#define ADD_REWARD(alg) CONCAT(alg, _add_reward)
+#define PRINT_STATE(alg) CONCAT(alg, _print_state)
+#define PRINT_ARM(alg) CONCAT(alg, _print_arm)
+
+#define MUT_ALG ts
+
 typedef struct afl_state {
+
+  BANDIT_T(MUT_ALG) mut_arms;
+  gsl_rng* gsl_rng_state;
 
   /* Position of this state in the global states list */
   u32 _id;

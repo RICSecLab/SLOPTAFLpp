@@ -28,6 +28,43 @@
 #include <limits.h>
 #include "cmplog.h"
 
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+
+#include <math.h>
+
+inline void ts_add_reward(ts_t* inst, int idx, u8 r) {
+  normal_bandit_arm *arm = &inst->arms[idx];
+
+  arm->num_selected++;
+  arm->total_rewards += r;
+  arm->sample_mean = ((double)(arm->total_rewards))/(arm->num_selected);
+}
+
+int ts_select_arm(afl_state_t *afl, ts_t* inst, u8* mask) {
+  int i;
+  int n = inst->n_arms;
+  normal_bandit_arm *slots = inst->arms;
+
+  double max_sampled = -1;
+  int selected_idx = 0;
+
+  for (i = 0; i < n; i++) {
+    if (mask && mask[i]) continue;
+
+    u64 total_rewards = slots[i].total_rewards;
+    u64 a = total_rewards + 1;
+    u64 b = slots[i].num_selected - total_rewards + 1;
+    double sampled = gsl_ran_beta(afl->gsl_rng_state, (double)a, (double)b);
+    if (sampled > max_sampled) {
+      max_sampled = sampled;
+      selected_idx = i;
+    }
+  }
+
+  return selected_idx;
+}
+
 /* MOpt */
 
 static int select_algorithm(afl_state_t *afl, u32 max_algorithm) {
@@ -2023,9 +2060,12 @@ havoc_stage:
 
   }
 
+  u8 mask[NUM_CASE_ENUM] = { 0 };
+  int selected_case[4];
+
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
-    u32 use_stacking = 1 << (1 + rand_below(afl, afl->havoc_stack_pow2));
+    const u32 use_stacking = 4; //1 << (1 + rand_below(afl, afl->havoc_stack_pow2));
 
     afl->stage_cur_val = use_stacking;
 
@@ -2035,6 +2075,32 @@ havoc_stage:
 #endif
 
     for (i = 0; i < use_stacking; ++i) {
+
+      memset(mask, 0, sizeof(mask));
+
+      if (!afl->extras_cnt) {
+        mask[OVERWRITE_WITH_EXTRA] = 1;
+        mask[INSERT_EXTRA] = 1;
+      }
+
+      if (!afl->a_extras_cnt) {
+        mask[OVERWRITE_WITH_AEXTRA] = 1;
+        mask[INSERT_AEXTRA] = 1;
+      }
+
+      if (afl->ready_for_splicing_count <= 1) {
+        mask[SPLICE_INSERT] = 1;
+        mask[SPLICE_OVERWRITE] = 1;
+      }
+
+      if (len < 2) {
+        mask[SPLICE_OVERWRITE] = 1;
+      }
+
+      // this is not enough to handle splice_insert, but ignore it for the time being
+      if (len + HAVOC_BLK_XL >= MAX_FILE) {
+        mask[SPLICE_INSERT] = 1;
+      }
 
       if (afl->custom_mutators_count) {
 
@@ -2071,7 +2137,23 @@ havoc_stage:
 
       }
 
-      switch ((r = rand_below(afl, r_max))) {
+      selected_case[i] = SELECT_ARM(MUT_ALG)(afl, &afl->mut_arms, mask);
+          
+      static const int case2r[] = {
+        0, 4, 8, 10, 12, 14, 16, 20, 24, 26, 28, 30, 32, 34, 36, 38, 40, 44, 47, 48, 51, 52, MAX_HAVOC_ENTRY+1,
+        MAX_HAVOC_ENTRY+3, MAX_HAVOC_ENTRY+5, MAX_HAVOC_ENTRY+7, MAX_HAVOC_ENTRY+10, MAX_HAVOC_ENTRY+9
+      };
+
+      r = case2r[selected_case[i]];
+      if (selected_case[i] >= OVERWRITE_WITH_AEXTRA) {
+        if (!afl->extras_cnt) r -= 4;
+      }
+
+      if (selected_case[i] >= SPLICE_OVERWRITE) {
+        if (!afl->a_extras_cnt) r -= 4;
+      }
+
+      switch (r) {
 
         case 0 ... 3: {
 
@@ -2727,7 +2809,17 @@ havoc_stage:
 
     }
 
-    if (common_fuzz_stuff(afl, out_buf, temp_len)) { goto abandon_entry; }
+    afl->fsrv.total_havocs++;
+
+    u8 should_abandon = common_fuzz_stuff(afl, out_buf, temp_len);
+    if (should_abandon) {
+
+      for (i = 0; i < use_stacking; ++i) {
+        ADD_REWARD(MUT_ALG)(&afl->mut_arms, selected_case[i], 0);
+      }
+
+      goto abandon_entry;
+    }
 
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
@@ -2742,6 +2834,10 @@ havoc_stage:
 
     if (afl->queued_paths != havoc_queued) {
 
+      for (i = 0; i < use_stacking; ++i) {
+        ADD_REWARD(MUT_ALG)(&afl->mut_arms, selected_case[i], 1);
+      }
+
       if (perf_score <= afl->havoc_max_mult * 100) {
 
         afl->stage_max *= 2;
@@ -2750,6 +2846,12 @@ havoc_stage:
       }
 
       havoc_queued = afl->queued_paths;
+
+    } else {
+
+      for (i = 0; i < use_stacking; ++i) {
+        ADD_REWARD(MUT_ALG)(&afl->mut_arms, selected_case[i], 0);
+      }
 
     }
 

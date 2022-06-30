@@ -34,6 +34,11 @@ char *power_names[POWER_SCHEDULES_NUM] = {"explore", "mmopt", "exploit",
                                           "fast",    "coe",   "lin",
                                           "quad",    "rare",  "seek"};
 
+void ts_init(afl_state_t *afl, ts_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->arms = calloc(sizeof(normal_bandit_arm), n_arms);
+}
+
 /* Initialize MOpt "globals" for this afl state */
 
 static void init_mopt_globals(afl_state_t *afl) {
@@ -121,6 +126,11 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->clean_trace_custom = ck_alloc(map_size);
   afl->first_trace = ck_alloc(map_size);
   afl->map_tmp_buf = ck_alloc(map_size);
+
+  gsl_rng_env_setup();
+  afl->gsl_rng_state = gsl_rng_alloc (gsl_rng_default);
+
+  INIT_INSTANCE(MUT_ALG) (afl, &afl->mut_arms, NUM_CASE_ENUM);
 
   afl->fsrv.use_stdin = 1;
   afl->fsrv.map_size = map_size;

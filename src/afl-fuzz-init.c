@@ -2041,7 +2041,14 @@ void setup_dirs_fds(afl_state_t *afl) {
         afl->fsrv.plot_file,
         "# relative_time, cycles_done, cur_path, paths_total, "
         "pending_total, pending_favs, map_size, unique_crashes, "
-        "unique_hangs, max_depth, execs_per_sec, total_execs, edges_found\n");
+        "unique_hangs, max_depth, execs_per_sec, total_execs, edges_found, total_havocs");
+
+    int j;
+    for (j=0; j<NUM_CASE_ENUM; j++) {
+      fprintf(afl->fsrv.plot_file, ", total_reward_mut_%d, num_selected_mut_%d", j, j);
+    }
+
+    fprintf(afl->fsrv.plot_file, "\n");
 
   } else {
 
