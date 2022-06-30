@@ -28,6 +28,57 @@
 #include <limits.h>
 #include "cmplog.h"
 
+#include <math.h>
+
+void ucb1_tuned_add_reward(ucb1_tuned_t* instance, int idx, u8 r) {
+  instance->time++;
+
+  ucb1_tuned_arm_t *arm = &instance->arms[idx];
+  arm->num_selected++;
+  arm->total_rewards += r;
+
+  double mean = ((double)(arm->total_rewards))/(arm->num_selected);
+  double frac = log(instance->time) / arm->num_selected;
+  double u_var = mean * (1 - mean) + sqrt(2 * frac);
+  double capped = MIN(0.25, u_var);
+  arm->ucb = mean + sqrt(frac * capped); 
+}
+
+inline u64 bandit_num_selected(ucb1_tuned_arm_t* arm) {
+  return arm->num_selected;
+}
+
+inline u64 bandit_total_rewards(ucb1_tuned_arm_t* arm) {
+  return arm->total_rewards;
+}
+
+/* Bandit */
+
+int ucb1_tuned_select_arm(afl_state_t *afl, ucb1_tuned_t* instance) {
+  int n = instance->n_arms;
+
+  int i;
+  double max_ucb = -1;
+  int selected_idx = 0;
+
+  ucb1_tuned_arm_t* slots = instance->arms;
+
+  for (i = 0; i < n; i++) {
+    // otherwise, sqrt(log(N)) will be invalid when #arms = 2
+    if (bandit_num_selected(&slots[i]) <= 1) {
+      selected_idx = i;
+      break;
+    }
+
+    if (slots[i].ucb > max_ucb) {
+      max_ucb = slots[i].ucb;
+      selected_idx = i;
+    }
+  }
+
+  return selected_idx;
+}
+
 /* MOpt */
 
 static int select_algorithm(afl_state_t *afl, u32 max_algorithm) {
@@ -2025,7 +2076,12 @@ havoc_stage:
 
   for (afl->stage_cur = 0; afl->stage_cur < afl->stage_max; ++afl->stage_cur) {
 
-    u32 use_stacking = 1 << (1 + rand_below(afl, afl->havoc_stack_pow2));
+    BANDIT_T(MUT_ALG) *slots = &afl->arms;
+    int selected_t = SELECT_ARM(MUT_ALG)(afl, slots);
+    BANDIT_T(MUT_ALG)* mut_arms = &afl->mut_arms[selected_t];
+    int selected_case = SELECT_ARM(MUT_ALG)(afl, mut_arms);
+
+    u32 use_stacking = 1 << selected_t;
 
     afl->stage_cur_val = use_stacking;
 
@@ -2071,7 +2127,10 @@ havoc_stage:
 
       }
 
-      switch ((r = rand_below(afl, r_max))) {
+      if (selected_case == 0) r = rand_below(afl, 44);
+      else r = 44 + rand_below(afl, r_max-44);
+
+      switch (r) {
 
         case 0 ... 3: {
 
@@ -2727,7 +2786,14 @@ havoc_stage:
 
     }
 
-    if (common_fuzz_stuff(afl, out_buf, temp_len)) { goto abandon_entry; }
+    afl->fsrv.total_havocs++;
+
+    u8 should_abandon = common_fuzz_stuff(afl, out_buf, temp_len);
+    if (should_abandon) {
+      ADD_REWARD(MUT_ALG)(slots, selected_t, 0);
+      ADD_REWARD(MUT_ALG)(mut_arms, selected_case, 0);
+      goto abandon_entry;
+    }
 
     /* out_buf might have been mangled a bit, so let's restore it to its
        original size and shape. */
@@ -2742,6 +2808,9 @@ havoc_stage:
 
     if (afl->queued_paths != havoc_queued) {
 
+      ADD_REWARD(MUT_ALG)(slots, selected_t, 1);
+      ADD_REWARD(MUT_ALG)(mut_arms, selected_case, 1);
+
       if (perf_score <= afl->havoc_max_mult * 100) {
 
         afl->stage_max *= 2;
@@ -2750,6 +2819,11 @@ havoc_stage:
       }
 
       havoc_queued = afl->queued_paths;
+
+    } else {
+
+      ADD_REWARD(MUT_ALG)(slots, selected_t, 0);
+      ADD_REWARD(MUT_ALG)(mut_arms, selected_case, 0);
 
     }
 

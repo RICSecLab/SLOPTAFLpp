@@ -37,6 +37,9 @@
   #define _FILE_OFFSET_BITS 64
 #endif
 
+#include <gsl/gsl_rng.h>
+#include <gsl/gsl_randist.h>
+
 #include "config.h"
 #include "types.h"
 #include "debug.h"
@@ -410,7 +413,36 @@ struct foreign_sync {
 
 };
 
+#define MAX_NUM_ARM 7
+
+#define ____CONCAT(a, b) a ## b
+#define CONCAT(a, b) ____CONCAT(a, b)
+#define BANDIT_T(alg) CONCAT(alg, _t)
+#define INIT_INSTANCE(alg) CONCAT(alg, _init)
+#define SELECT_ARM(alg) CONCAT(alg, _select_arm)
+#define ADD_REWARD(alg) CONCAT(alg, _add_reward)
+#define PRINT_STATE(alg) CONCAT(alg, _print_state)
+#define PRINT_ARM(alg) CONCAT(alg, _print_arm)
+
+#define MUT_ALG ucb1_tuned
+
+typedef struct {
+  u64 num_selected;
+  u64 total_rewards;
+  double ucb;
+} ucb1_tuned_arm_t;
+
+typedef struct {
+  u64 time;
+  int n_arms;
+  ucb1_tuned_arm_t *arms;
+} ucb1_tuned_t;
+
 typedef struct afl_state {
+  BANDIT_T(MUT_ALG) arms;
+  BANDIT_T(MUT_ALG) mut_arms[MAX_NUM_ARM];
+
+  gsl_rng* gsl_rng_state;
 
   /* Position of this state in the global states list */
   u32 _id;

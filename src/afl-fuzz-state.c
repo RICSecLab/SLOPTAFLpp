@@ -34,6 +34,12 @@ char *power_names[POWER_SCHEDULES_NUM] = {"explore", "mmopt", "exploit",
                                           "fast",    "coe",   "lin",
                                           "quad",    "rare",  "seek"};
 
+void ucb1_tuned_init(afl_state_t *afl, ucb1_tuned_t *v, int n_arms) {
+  v->n_arms = n_arms;
+  v->time = 0;
+  v->arms = calloc(sizeof(ucb1_tuned_arm_t), n_arms);
+}
+
 /* Initialize MOpt "globals" for this afl state */
 
 static void init_mopt_globals(afl_state_t *afl) {
@@ -95,7 +101,8 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
   afl->stage_name = "init";             /* Name of the current fuzz stage   */
   afl->splicing_with = -1;              /* Splicing with which test case?   */
   afl->cpu_to_bind = -1;
-  afl->havoc_stack_pow2 = HAVOC_STACK_POW2;
+  afl->havoc_stack_pow2 = 6;
+  //afl->havoc_stack_pow2 = HAVOC_STACK_POW2;
   afl->hang_tmout = EXEC_TIMEOUT;
   afl->exit_on_time = 0;
   afl->stats_update_freq = 1;
@@ -111,6 +118,14 @@ void afl_state_init(afl_state_t *afl, uint32_t map_size) {
 #ifdef HAVE_AFFINITY
   afl->cpu_aff = -1;                    /* Selected CPU core                */
 #endif                                                     /* HAVE_AFFINITY */
+
+  gsl_rng_env_setup();
+  afl->gsl_rng_state = gsl_rng_alloc (gsl_rng_default);
+
+  INIT_INSTANCE(MUT_ALG)(afl, &afl->arms, afl->havoc_stack_pow2+1);
+  for (int t=0; t<=afl->havoc_stack_pow2; t++) {
+    INIT_INSTANCE(MUT_ALG)(afl, &afl->mut_arms[t], 2);
+  }
 
   afl->virgin_bits = ck_alloc(map_size);
   afl->virgin_tmout = ck_alloc(map_size);

@@ -59,6 +59,7 @@ typedef struct afl_forkserver {
   u64 mem_limit;                        /* Memory cap for child (MB)        */
 
   u64 total_execs;                      /* How often run_target was called  */
+  u64 total_havocs;
 
   u8 *out_file,                         /* File to fuzz, if any             */
       *target_path;                     /* Path of the target               */
