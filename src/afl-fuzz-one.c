@@ -28,6 +28,7 @@
 #include <limits.h>
 #include "cmplog.h"
 
+#include <math.h>
 #include <gsl/gsl_rng.h>
 #include <gsl/gsl_randist.h>
 
@@ -195,8 +196,6 @@ u64 exppp_select_arm(afl_state_t *afl, exppp_t* self, u8* mask) {
   self->pulls[choice] += 1;
   return choice;
 }
-
-#include <math.h>
 
 u64 expix_select_arm(afl_state_t *afl, expix_t* self, u8* mask) {
   self->t++;
