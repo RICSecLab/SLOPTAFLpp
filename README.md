@@ -41,3 +41,20 @@ To run these benchmarks, please follow the instructions of FuzzBench and MAGMA:
   - https://hexhive.epfl.ch/magma/docs/getting-started.html
 
 The results of benchmarks are left in `./benchs` of the `benchmark` branch.
+
+# Citation
+
+```
+@inproceedings{SLOPT-ACSAC22,
+  author    = {Yuki Koike and
+               Hiroyuki Katsura and
+               Hiromu Yakura and
+               Yuma Kurogome},
+  title     = {SLOPT: Bandit Optimization Framework for Mutation-Based Fuzzing},
+  booktitle = {Proceedings of the 38th Annual Computer Security Applications Conference,
+               {ACSAC} 2022, Austin, TX, USA, December 5-9, 2022},
+  pages     = {to apper},
+  publisher = {{ACM}},
+  year      = {2022},
+}
+```
