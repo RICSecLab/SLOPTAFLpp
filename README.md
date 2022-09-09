@@ -53,7 +53,7 @@ The results of benchmarks are left in `./benchs` of the `benchmark` branch.
   title     = {SLOPT: Bandit Optimization Framework for Mutation-Based Fuzzing},
   booktitle = {Proceedings of the 38th Annual Computer Security Applications Conference,
                {ACSAC} 2022, Austin, TX, USA, December 5-9, 2022},
-  pages     = {to apper},
+  pages     = {to appear},
   publisher = {{ACM}},
   year      = {2022},
 }
