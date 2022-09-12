@@ -1,0 +1,2 @@
+AFL_LLVM_DICT2FILE=/out/afl++.dict
+AFL_QUIET=1
