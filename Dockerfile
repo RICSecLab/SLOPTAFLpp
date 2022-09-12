@@ -20,12 +20,13 @@ RUN dpkg --add-architecture i386 &&\
 ENV LLVM_CONFIG=llvm-config-11
 
 # build (patched) AFL++
-RUN cd / && git clone https://github.com/RICSecLab/SLOPTAFLpp &&\
+RUN cd / && git clone --depth 1 --branch cmfuzz https://github.com/RICSecLab/SLOPTAFLpp &&\
     cd /SLOPTAFLpp &&\
-    git checkout cmfuzz &&\
     export CC=gcc-10 &&\
     export CXX=g++-10 &&\
     make clean && \
-    make source-only && make install && make clean &&\
+    make source-only -j$(nproc) && make install && make clean &&\
     cd / &&\
-    which afl-fuzz
+    which afl-fuzz &&\
+    mv /SLOPTAFLpp/PUTs /FuzzbenchPUTs
+WORKDIR /FuzzbenchPUTs
