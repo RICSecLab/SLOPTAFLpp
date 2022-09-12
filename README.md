@@ -35,12 +35,19 @@ However, note that you should never use `-L` because it enables MOpt instead of 
 # How to take the benchmarks taken in our paper
 
 In our paper, we used as benchmarks FuzzBench and MAGMA, both of which are very standardized and don't require much of manual effort.
+Moreover, because every fuzzer is implemented as a small patch to AFL++, these fuzzer are much easier to run than a general fuzzer.
+You can run these fuzzers basically just by copying the configuration files for AFL++ and replacing the AFL++ directory with the directory of each fuzzer.
 
 To run these benchmarks, please follow the instructions of FuzzBench and MAGMA:
   - https://google.github.io/fuzzbench/getting-started/adding-a-new-fuzzer/
   - https://hexhive.epfl.ch/magma/docs/getting-started.html
 
-The results of benchmarks are left in `./benchs` of the `benchmark` branch.
+For MAGMA, we also made it possible to take the benchmark with one command in https://github.com/RICSecLab/SLOPT_magma.
+For FuzzBench, we recommend cloning its latest repository and putting these fuzzers by yourself because FuzzBench sometimes looks buggy and hard to run.
+However, we instead put the actual PUTs, seeds and dictionaries used in our evaluation on the above docker images.
+Please check `/FuzzbenchPUTs` for these files.
+
+The results of the FuzzBench benchmark in our paper are left in `./benchs` of the `benchmark` branch.
 
 # Citation
 
