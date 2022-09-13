@@ -47,7 +47,7 @@ For FuzzBench, we recommend cloning its latest repository and putting these fuzz
 However, we instead put the actual PUTs, seeds and dictionaries used in our evaluation on the above docker images.
 Please check `/FuzzbenchPUTs` for these files.
 
-The results of the FuzzBench benchmark in our paper are left in `./benchs` of the `benchmark` branch.
+The results of the FuzzBench benchmark in our paper are left in `./benchs` of the `benchmark` branch, and those of the Magma benchmark can be downloaded from [here](https://drive.google.com/file/d/1sx_OJ2Mr5vNRuT_sATa0-TBkGyj2DK99/view?usp=sharing).
 
 # Citation
 
