@@ -43,9 +43,23 @@ To run these benchmarks, please follow the instructions of FuzzBench and MAGMA:
   - https://hexhive.epfl.ch/magma/docs/getting-started.html
 
 For MAGMA, we also made it possible to take the benchmark with one command in https://github.com/RICSecLab/SLOPT_magma.
-For FuzzBench, we recommend cloning its latest repository and putting these fuzzers by yourself because FuzzBench sometimes looks buggy and hard to run.
-However, we instead put the actual PUTs, seeds and dictionaries used in our evaluation on the above docker images.
-Please check `/FuzzbenchPUTs` for these files.
+
+For FuzzBench, we recommend cloning its latest repository and putting these fuzzers by yourself because FuzzBench sometimes looks buggy and hard to run on some envrironments.
+However, we instead put the actual PUTs, seeds and dictionaries used for our evaluation in https://github.com/RICSecLab/SLOPTAFLpp/tree/main/PUTs and `/FuzzbenchPUTs` of the above docker images.
+
+To fuzz each PUT, move to the corresponding subdirectory and run one of the following commands:
+
+- freetype2-2017:    `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -- ./ftfuzzer @@`
+- lcms-2017-03-21:   `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -x ./cms_transform_fuzzer.dict -- ./cms_transform_fuzzer @@`
+- vorbis-2017-12-11: `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -- ./decode_fuzzer @@`
+- libpcap\_fuzz\_both: `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -- ./fuzz_both @@`
+- openssl\_x509:      `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -x ./x509.dict -- ./x509 @@`
+- sqlite3\_ossfuzz:   `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -x ./ossfuzz.dict -- ./ossfuzz @@`
+- libxml2-v2.9.2:    `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -x ./xml.dict -- ./xml @@`
+- re2-2014-12-09:    `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -x ./fuzz-target.dict -- ./fuzzer @@`
+- proj4-2017-08-14:  `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -x ./standard_fuzzer.dict -- ./standard_fuzzer @@`
+- libpng-1.2.56:     `afl-fuzz -i ./seeds -o ./outdir -x ./afl++.dict -x ./libpng_read_fuzzer.dict -- ./libpng_read_fuzzer @@`
+
 
 The results of the FuzzBench benchmark in our paper are left in `./benchs` of the `benchmark` branch, and those of the Magma benchmark can be downloaded from [here](https://drive.google.com/file/d/1sx_OJ2Mr5vNRuT_sATa0-TBkGyj2DK99/view?usp=sharing).
 
