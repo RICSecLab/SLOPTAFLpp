@@ -62,6 +62,7 @@ To fuzz each PUT, move to the corresponding subdirectory and run one of the foll
 
 
 The results of the FuzzBench benchmark in our paper are left in `./benchs` of the `benchmark` branch, and those of the Magma benchmark can be downloaded from [here](https://drive.google.com/file/d/1sx_OJ2Mr5vNRuT_sATa0-TBkGyj2DK99/view?usp=sharing).
+To fully reproduce our results, a considerable amount of computing resources is required. For FuzzBench, we used 1 [day] x 1 [CPU] x 6 (fuzzers) x 10 (PUTs) x 30 (instances) = 1800 [CPU x day]. For MAGMA, we used 1 [d] x 1 [CPU] x 6 (fuzzers) x 21 (PUTs) x 10 (instances) = 1260 [CPU x day]. Note that, moreover, we took benchmarks with AMD EPYC 7742 2.25GHz CPU, which may run somewhat faster than ordinary CPUs used in clouds although we ran 110 fuzzer instances in parallel. To check whether it is faster, please compare the `execs_per_sec` column of `plot_data`s in https://github.com/RICSecLab/SLOPTAFLpp/tree/benchmark/benchs/.
 
 # Citation
 
