@@ -1,6 +1,6 @@
 # SLOPT-AFL++
 
-This repository contains the implementation of SLOPT-AFL++ and the three existing methods Karamcheti-AFL++, CMFuzz-AFL++, and HavocMAB-AFL++, all of which are introduced in our paper "SLOPT: Bandit Optimization Framework for Mutation-Based Fuzzing".
+This repository contains the implementations of SLOPT-AFL++ and the three existing methods Karamcheti-AFL++, CMFuzz-AFL++, and HavocMAB-AFL++, all of which are introduced in our paper "SLOPT: Bandit Optimization Framework for Mutation-Based Fuzzing".
 
 SLOPT-AFL++ is implemented in the `main` branch.
 The existing methods are implemented in the following branches:
@@ -35,7 +35,7 @@ However, note that you should never use `-L` because it enables MOpt instead of 
 # How to take the benchmarks taken in our paper
 
 In our paper, we used as benchmarks FuzzBench and MAGMA, both of which are very standardized and don't require much of manual effort.
-Moreover, because every fuzzer is implemented as a small patch to AFL++, these fuzzer are much easier to run than a general fuzzer.
+Moreover, because every fuzzer is implemented as a small patch to AFL++, these fuzzers are much easier to run than a general fuzzer.
 You can run these fuzzers basically just by copying the configuration files for AFL++ and replacing the AFL++ directory with the directory of each fuzzer.
 
 To run these benchmarks, please follow the instructions of FuzzBench and MAGMA:
