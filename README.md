@@ -3,7 +3,7 @@
 This repository contains the implementations of SLOPT-AFL++ and the three existing methods Karamcheti-AFL++, CMFuzz-AFL++, and HavocMAB-AFL++, all of which are introduced in our paper "SLOPT: Bandit Optimization Framework for Mutation-Based Fuzzing".
 
 <strong>SLOPT</strong> enhances AFL++'s mutation scheme by introducing bandit-friendly mutation scheme and mutation-scheme-friendly bandit algorithms to AFL++. 
-From our experiments, SLOPT can achieve higher code coverage than AFL++ in ten real-world Fuzz thanks to its PUT-agnostic optimization.
+Our experiments showed SLOPT can achieve higher code coverage than AFL++ in ten real-world Fuzz thanks to its PUT-agnostic optimization.
 Please see our paper for further detail.
 
 To compare our fuzzer with the previous methods, we also implemented three fuzzers that applies online opitimizations to their mutation: Karamcheti-AFL++ [1], CMFuzz-AFL++ [2] and HavocMAB-AFL++ [3]. 
